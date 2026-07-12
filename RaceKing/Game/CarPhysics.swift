@@ -10,6 +10,9 @@ struct CarPhysics {
     static let maxSpeed: Float = 0.65
     static let acceleration: Float = 0.55
     static let brakeDeceleration: Float = 1.4
+    /// Holding the brake past a standstill backs the car up, gently.
+    static let reverseAcceleration: Float = 0.5
+    static let maxReverseSpeed: Float = 0.22
     static let rollingDrag: Float = 0.35
     static let offRoadDrag: Float = 2.2
 
@@ -34,16 +37,20 @@ struct CarPhysics {
         steering += (steeringInput - steering) * min(1, dt * 10)
 
         if throttle { speed += Self.acceleration * dt }
-        if brake { speed -= Self.brakeDeceleration * dt }
+        if brake {
+            speed -= (speed > 0 ? Self.brakeDeceleration : Self.reverseAcceleration) * dt
+        }
 
         // The road has grip; leaving it slows the car down hard.
         var drag = Self.rollingDrag
         if offRoad { drag += Self.offRoadDrag }
         speed -= drag * speed * dt
-        speed = max(0, min(speed, topSpeed))
+        speed = max(-Self.maxReverseSpeed, min(speed, topSpeed))
 
-        // Yaw response grows with speed so the car can't pivot in place.
-        let grip = 0.25 + 0.75 * (speed / Self.maxSpeed)
+        // Yaw response grows with speed so the car can't pivot in place;
+        // in reverse it flips, like a real car backing up.
+        let ratio = min(1, abs(speed) / Self.maxSpeed)
+        let grip = (0.25 + 0.75 * ratio) * (speed < 0 ? -1 : 1)
         heading -= steering * 2.8 * grip * dt
         return forward * speed * dt
     }

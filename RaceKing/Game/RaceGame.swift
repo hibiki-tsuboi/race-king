@@ -182,9 +182,11 @@ final class RaceGame {
             updateGhost()
             updateRanking()
         case .finished:
-            // Let the field keep rolling past the flag.
+            // Let the field keep rolling past the flag; brake only to a stop,
+            // not into reverse.
             car.position += physics.step(
-                dt: dt, steeringInput: 0, throttle: false, brake: true, offRoad: false
+                dt: dt, steeringInput: 0, throttle: false,
+                brake: physics.speed > 0.01, offRoad: false
             )
             car.orientation = simd_quatf(angle: physics.heading, axis: [0, 1, 0])
             stepAI(dt)
@@ -201,7 +203,7 @@ final class RaceGame {
             throttle: throttleInput, brake: brakeInput, offRoad: offRoad
         )
         car.orientation = simd_quatf(angle: physics.heading, axis: [0, 1, 0])
-        displaySpeed = Int(physics.speed * 400)
+        displaySpeed = Int(abs(physics.speed) * 400)
 
         if offRoad {
             offRoadPulse -= deltaTime
