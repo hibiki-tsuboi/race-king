@@ -43,10 +43,18 @@ struct ContentView: View {
                         drifting: game.isDrifting
                     )
                 }
+            } update: { content in
+                #if !targetEnvironment(simulator)
+                // One-way switch to the non-AR presentation.
+                if game.virtualModeActive {
+                    content.camera = .virtual
+                }
+                #endif
             }
             #if targetEnvironment(simulator)
             .realityViewCameraControls(.orbit)
             #else
+            .realityViewCameraControls(game.virtualModeActive ? .orbit : .none)
             // AR: tap moves the course to the aimed floor point; holding a
             // drag carries it along the aim continuously.
             .onTapGesture { moveCourseTowardAim() }
@@ -59,8 +67,8 @@ struct ContentView: View {
 
             GameOverlayView(game: game)
 
-            if cameraAccessDenied {
-                CameraDeniedView()
+            if cameraAccessDenied && !game.virtualModeActive {
+                CameraDeniedView { game.activateVirtualMode() }
             }
         }
         .persistentSystemOverlays(.hidden)
@@ -88,6 +96,7 @@ struct ContentView: View {
     #if !targetEnvironment(simulator)
     /// Casts the camera's aim onto the floor and moves the course there.
     private func moveCourseTowardAim() {
+        guard !game.virtualModeActive else { return }
         let transform = game.cameraRig.transformMatrix(relativeTo: nil)
         let origin = SIMD3<Float>(
             transform.columns.3.x, transform.columns.3.y, transform.columns.3.z
@@ -109,8 +118,11 @@ struct ContentView: View {
     }
 }
 
-/// Shown when camera access was denied: AR cannot run without it.
+/// Shown when camera access was denied: AR cannot run without it,
+/// but the game still can, with a virtual camera.
 private struct CameraDeniedView: View {
+    var onPlayWithoutAR: () -> Void
+
     var body: some View {
         VStack(spacing: 14) {
             Image(systemName: "camera.fill")
@@ -130,6 +142,16 @@ private struct CameraDeniedView: View {
                     .padding(.horizontal, 24)
                     .padding(.vertical, 10)
                     .background(.red.gradient, in: Capsule())
+            }
+            .buttonStyle(.plain)
+            Button {
+                onPlayWithoutAR()
+            } label: {
+                Text("ARなしで遊ぶ")
+                    .font(.headline.bold())
+                    .padding(.horizontal, 24)
+                    .padding(.vertical, 10)
+                    .background(.blue.gradient, in: Capsule())
             }
             .buttonStyle(.plain)
         }

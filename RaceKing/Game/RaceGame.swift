@@ -105,6 +105,31 @@ final class RaceGame {
     let root = Entity()
     /// Follows the AR camera so course placement can use the aim direction.
     let cameraRig = Entity()
+
+    // MARK: - Non-AR fallback
+
+    /// True after the player opts into playing without AR (dark rooms,
+    /// undetectable floors, or a denied camera permission).
+    private(set) var virtualModeActive = false
+    /// Turns true once floor detection has struggled for a while.
+    private(set) var canOfferVirtualMode = false
+    private var floorSearchTime: TimeInterval = 0
+    /// Camera entity for the non-AR mode (configured on activation).
+    let virtualCamera = Entity()
+
+    /// Switches to a fixed virtual camera over a grass floor — the same
+    /// presentation the simulator uses. One-way until the next launch.
+    func activateVirtualMode() {
+        guard !virtualModeActive else { return }
+        virtualModeActive = true
+        anchorRoot.components.remove(AnchoringComponent.self)
+        anchorRoot.transform = .identity
+        root.transform = .identity
+        anchorRoot.addChild(EntityFactory.makeFallbackGround())
+        virtualCamera.components.set(PerspectiveCameraComponent())
+        virtualCamera.look(at: .zero, from: [0, 1.9, 2.4], relativeTo: nil)
+        anchorRoot.addChild(virtualCamera)
+    }
     private let car: Entity
     private let ghostCar: Entity
     private let checkpoints: [SIMD3<Float>]
@@ -255,6 +280,14 @@ final class RaceGame {
         let anchored = !anchorRoot.components.has(AnchoringComponent.self)
             || anchorRoot.isAnchored
         if anchored != isCourseAnchored { isCourseAnchored = anchored }
+
+        // Offer the non-AR mode when floor detection keeps struggling.
+        if phase == .ready, !anchored, !virtualModeActive {
+            floorSearchTime += deltaTime
+            if floorSearchTime >= 8, !canOfferVirtualMode {
+                canOfferVirtualMode = true
+            }
+        }
 
         let dt = Float(min(deltaTime, 1.0 / 20.0))
         switch phase {

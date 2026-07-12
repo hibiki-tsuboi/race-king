@@ -38,6 +38,19 @@ struct GameOverlayView: View {
                         .font(.callout.bold())
                         .multilineTextAlignment(.center)
                         .foregroundStyle(.white)
+                    if game.canOfferVirtualMode {
+                        Button {
+                            game.activateVirtualMode()
+                        } label: {
+                            Text("ARなしで遊ぶ")
+                                .font(.headline.bold())
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 24)
+                                .padding(.vertical, 10)
+                                .background(.blue.gradient, in: Capsule())
+                        }
+                        .buttonStyle(.plain)
+                    }
                 }
                 .padding(22)
                 .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 16))
