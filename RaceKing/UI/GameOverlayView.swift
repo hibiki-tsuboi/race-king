@@ -45,6 +45,13 @@ struct GameOverlayView: View {
                 .padding(6)
                 .background(.black.opacity(0.4), in: RoundedRectangle(cornerRadius: 12))
 
+                Text("コーナー中にブレーキをタップでドリフト!\n長く滑るほどミニターボ")
+                    .font(.caption.bold())
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(.white)
+                    .padding(8)
+                    .background(.black.opacity(0.4), in: RoundedRectangle(cornerRadius: 10))
+
                 Button {
                     game.startRace()
                 } label: {

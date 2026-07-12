@@ -32,6 +32,14 @@ final class Haptics {
             light.impactOccurred(intensity: 0.7)
         case .wallHit:
             rigid.impactOccurred()
+        case .driftStarted:
+            medium.impactOccurred(intensity: 0.8)
+        case .driftPulse:
+            light.impactOccurred(intensity: 0.45)
+        case .driftChargeLevelUp(let level):
+            (level >= 2 ? heavy : rigid).impactOccurred()
+        case .driftEnded(let boostLevel):
+            if boostLevel > 0 { heavy.impactOccurred() }
         }
     }
 }

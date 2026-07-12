@@ -22,6 +22,13 @@ enum GameEvent {
     case offRoad
     /// The player bumped a barrier wall hard.
     case wallHit
+    case driftStarted
+    /// Periodic pulse while drifting.
+    case driftPulse
+    /// Mini-turbo charge reached a new tier (1 = blue, 2 = orange).
+    case driftChargeLevelUp(Int)
+    /// Drift finished; boostLevel 0 means no mini-turbo fired.
+    case driftEnded(boostLevel: Int)
 }
 
 /// Drives the whole game: owns the scene entities, integrates car physics
@@ -101,6 +108,7 @@ final class RaceGame {
     var carHeading: Float { physics.heading }
     var speedRatio: Float { physics.speed / CarPhysics.maxSpeed }
     var isEngineRunning: Bool { phase == .countdown || phase == .racing }
+    var isDrifting: Bool { physics.isDrifting }
 
     // MARK: - Simulation
 
@@ -113,6 +121,22 @@ final class RaceGame {
     private var aiFinishedCount = 0
     private var offRoadPulse: TimeInterval = 0
     private var wallHitCooldown: TimeInterval = 0
+
+    // MARK: - Drift bookkeeping
+
+    private var brakeHoldTime: TimeInterval = 0
+    private var driftReleaseGrace: TimeInterval = 0
+    private var driftChargeLevelSeen = 0
+    private var driftPulseTimer: TimeInterval = 0
+    private var driftHopRemaining: TimeInterval = 0
+    private var smokeSpawnTimer: TimeInterval = 0
+    private var smokePuffs: [(entity: ModelEntity, age: Float)] = []
+    private var glowBlue: Entity?
+    private var glowOrange: Entity?
+    private var boostFlame: Entity?
+
+    private static let smokeMesh = MeshResource.generateSphere(radius: 0.0045)
+    private static let smokeMaterial = UnlitMaterial(color: .init(white: 0.95, alpha: 1))
 
     private static let bestLapKey = "bestLapTime"
 
@@ -129,6 +153,9 @@ final class RaceGame {
         root.addChild(EntityFactory.makeTrack(layout: layout))
         root.addChild(car)
         root.addChild(ghostCar)
+        glowBlue = car.findEntity(named: "glowBlue")
+        glowOrange = car.findEntity(named: "glowOrange")
+        boostFlame = car.findEntity(named: "boostFlame")
 
         let savedBest = UserDefaults.standard.double(forKey: Self.bestLapKey)
         bestLapTime = savedBest > 0 ? savedBest : nil
@@ -154,6 +181,7 @@ final class RaceGame {
         finalPosition = nil
         aiFinishedCount = 0
         ghostCar.isEnabled = false
+        clearDriftState()
         placeCarsOnGrid()
     }
 
@@ -193,6 +221,7 @@ final class RaceGame {
             )
             car.orientation = simd_quatf(angle: physics.heading, axis: [0, 1, 0])
             collidePlayerWithWalls()
+            updateDriftEffects(deltaTime)
             stepAI(dt)
             separateCars()
         }
@@ -201,11 +230,19 @@ final class RaceGame {
     // MARK: - Per-frame stepping
 
     private func stepPlayer(_ dt: Float, deltaTime: TimeInterval) {
+        updateDrift(deltaTime)
         let offRoad = layout.distanceFromCenterline(car.position) > layout.roadWidth / 2 + 0.015
         car.position += physics.step(
             dt: dt, steeringInput: steeringInput,
-            throttle: throttleInput, brake: brakeInput, offRoad: offRoad
+            throttle: throttleInput,
+            brake: brakeInput && !physics.isDrifting,
+            offRoad: offRoad
         )
+        // A small hop when the drift kicks in.
+        driftHopRemaining = max(0, driftHopRemaining - deltaTime)
+        car.position.y = driftHopRemaining > 0
+            ? sin(.pi * Float(1 - driftHopRemaining / 0.16)) * 0.01
+            : 0
         car.orientation = simd_quatf(angle: physics.heading, axis: [0, 1, 0])
 
         let impact = collidePlayerWithWalls()
@@ -214,6 +251,12 @@ final class RaceGame {
             onEvent?(.wallHit)
             wallHitCooldown = 0.3
         }
+        // Slamming a wall kills the drift without a reward.
+        if impact > 0.2, physics.isDrifting {
+            physics.endDrift(rewardBoost: false)
+            onEvent?(.driftEnded(boostLevel: 0))
+        }
+        updateDriftEffects(deltaTime)
         displaySpeed = Int(abs(physics.speed) * 400)
 
         if offRoad {
@@ -242,6 +285,104 @@ final class RaceGame {
                 aiFinishedCount += 1
             }
         }
+    }
+
+    // MARK: - Drift
+
+    /// Starts a drift on a brake tap while turning at speed, and ends it
+    /// when the player straightens up (with a mini-turbo), holds the brake
+    /// for real braking, or slows down too much.
+    private func updateDrift(_ deltaTime: TimeInterval) {
+        brakeHoldTime = brakeInput ? brakeHoldTime + deltaTime : 0
+
+        guard physics.isDrifting else {
+            let isTapFrame = brakeInput && brakeHoldTime <= deltaTime
+            if isTapFrame, abs(steeringInput) > 0.25, physics.speed > CarPhysics.driftMinSpeed {
+                physics.startDrift(direction: steeringInput > 0 ? 1 : -1)
+                driftChargeLevelSeen = 0
+                driftReleaseGrace = 0
+                driftHopRemaining = 0.16
+                onEvent?(.driftStarted)
+            }
+            return
+        }
+
+        var reward = true
+        var endNow = false
+        // Straightening up (or counter-steering past neutral) ends the drift.
+        if steeringInput * physics.driftDirection < 0.15 {
+            driftReleaseGrace += deltaTime
+            endNow = driftReleaseGrace > 0.12
+        } else {
+            driftReleaseGrace = 0
+        }
+        // Holding the brake means the player actually wants to brake.
+        if brakeHoldTime > 0.22 { endNow = true; reward = false }
+        if physics.speed < CarPhysics.driftMinSpeed { endNow = true; reward = false }
+
+        if endNow {
+            let level = physics.endDrift(rewardBoost: reward)
+            onEvent?(.driftEnded(boostLevel: level))
+        } else if physics.chargeLevel > driftChargeLevelSeen {
+            driftChargeLevelSeen = physics.chargeLevel
+            onEvent?(.driftChargeLevelUp(driftChargeLevelSeen))
+        }
+    }
+
+    /// Underglow, boost flame, tire smoke, and drift haptic pulses.
+    private func updateDriftEffects(_ deltaTime: TimeInterval) {
+        glowBlue?.isEnabled = physics.isDrifting && physics.chargeLevel == 1
+        glowOrange?.isEnabled = physics.isDrifting && physics.chargeLevel >= 2
+        boostFlame?.isEnabled = physics.isBoosting
+
+        if physics.isDrifting {
+            driftPulseTimer -= deltaTime
+            if driftPulseTimer <= 0 {
+                onEvent?(.driftPulse)
+                driftPulseTimer = 0.12
+            }
+            smokeSpawnTimer -= deltaTime
+            if smokeSpawnTimer <= 0 {
+                spawnSmokePuff()
+                smokeSpawnTimer = 0.045
+            }
+        } else {
+            driftPulseTimer = 0
+            smokeSpawnTimer = 0
+        }
+
+        let smokeLife: Float = 0.4
+        for i in smokePuffs.indices { smokePuffs[i].age += Float(deltaTime) }
+        for puff in smokePuffs where puff.age >= smokeLife { puff.entity.removeFromParent() }
+        smokePuffs.removeAll { $0.age >= smokeLife }
+        for puff in smokePuffs {
+            let t = puff.age / smokeLife
+            puff.entity.scale = SIMD3(repeating: 0.7 + 1.8 * t)
+            puff.entity.components.set(OpacityComponent(opacity: 0.65 * (1 - t)))
+        }
+    }
+
+    private func spawnSmokePuff() {
+        let puff = ModelEntity(mesh: Self.smokeMesh, materials: [Self.smokeMaterial])
+        puff.position = car.position - physics.forward * 0.045 + SIMD3(
+            Float.random(in: -0.012...0.012), 0.008, Float.random(in: -0.012...0.012)
+        )
+        puff.components.set(OpacityComponent(opacity: 0.65))
+        root.addChild(puff)
+        smokePuffs.append((puff, 0))
+    }
+
+    private func clearDriftState() {
+        physics.endDrift(rewardBoost: false)
+        brakeHoldTime = 0
+        driftReleaseGrace = 0
+        driftChargeLevelSeen = 0
+        driftHopRemaining = 0
+        for puff in smokePuffs { puff.entity.removeFromParent() }
+        smokePuffs.removeAll()
+        glowBlue?.isEnabled = false
+        glowOrange?.isEnabled = false
+        boostFlame?.isEnabled = false
     }
 
     /// Keeps the player between the barrier walls: projects the car back
@@ -335,6 +476,7 @@ final class RaceGame {
                 finalPosition = position
                 playerPosition = position
                 phase = .finished
+                physics.endDrift(rewardBoost: false)
                 onEvent?(.raceFinished(position: position))
             } else {
                 onEvent?(.lapCompleted(isBest: false))

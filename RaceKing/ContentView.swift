@@ -36,7 +36,11 @@ struct ContentView: View {
                 content.add(game.root)
                 updateSubscription = content.subscribe(to: SceneEvents.Update.self) { event in
                     game.update(deltaTime: event.deltaTime)
-                    audio.setEngine(speedRatio: game.speedRatio, running: game.isEngineRunning)
+                    audio.setEngine(
+                        speedRatio: game.speedRatio,
+                        running: game.isEngineRunning,
+                        drifting: game.isDrifting
+                    )
                 }
             }
             #if os(macOS) || (os(iOS) && targetEnvironment(simulator))

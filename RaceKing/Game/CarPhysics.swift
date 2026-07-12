@@ -15,10 +15,35 @@ struct CarPhysics {
     static let maxReverseSpeed: Float = 0.22
     static let rollingDrag: Float = 0.35
     static let offRoadDrag: Float = 2.2
+    static let driftDrag: Float = 0.35
+    /// Below this speed a drift cannot start (or survive).
+    static let driftMinSpeed: Float = 0.3
+    /// Seconds of drifting to charge mini-turbo level 1 (blue) and 2 (orange).
+    /// A corner on this track takes roughly half a second of sliding.
+    static let chargeLevel1: Float = 0.45
+    static let chargeLevel2: Float = 1.2
 
     var speed: Float = 0
     var heading: Float = 0
     private var steering: Float = 0
+
+    // MARK: - Drift state
+
+    private(set) var isDrifting = false
+    /// +1 while drifting right, -1 left. Keeps its last value after a drift
+    /// ends so the slip angle can ease back to zero on the same side.
+    private(set) var driftDirection: Float = 0
+    private(set) var driftCharge: Float = 0
+    private var slip: Float = 0
+    private var boostTimer: Float = 0
+
+    var isBoosting: Bool { boostTimer > 0 }
+    /// Mini-turbo tier charged so far: 0 none, 1 blue, 2 orange.
+    var chargeLevel: Int {
+        if driftCharge >= Self.chargeLevel2 { return 2 }
+        if driftCharge >= Self.chargeLevel1 { return 1 }
+        return 0
+    }
 
     var forward: SIMD3<Float> { [sin(heading), 0, cos(heading)] }
 
@@ -26,6 +51,31 @@ struct CarPhysics {
         speed = 0
         steering = 0
         heading = newHeading
+        isDrifting = false
+        driftDirection = 0
+        driftCharge = 0
+        slip = 0
+        boostTimer = 0
+    }
+
+    mutating func startDrift(direction: Float) {
+        isDrifting = true
+        driftDirection = direction
+        driftCharge = 0
+        // The kick into the slide bites off a little speed.
+        speed *= 0.9
+    }
+
+    /// Ends the drift and returns the mini-turbo level fired (0 = none).
+    @discardableResult
+    mutating func endDrift(rewardBoost: Bool) -> Int {
+        guard isDrifting else { return 0 }
+        let level = chargeLevel
+        isDrifting = false
+        driftCharge = 0
+        guard rewardBoost, level > 0 else { return 0 }
+        boostTimer = level == 2 ? 1.4 : 0.7
+        return level
     }
 
     /// Integrates one step and returns the movement delta.
@@ -36,23 +86,55 @@ struct CarPhysics {
         // Ease the wheel toward the input so steering isn't twitchy.
         steering += (steeringInput - steering) * min(1, dt * 10)
 
+        var effectiveTop = topSpeed
+        if boostTimer > 0 {
+            boostTimer -= dt
+            effectiveTop = topSpeed * 1.28
+            speed += 1.5 * dt
+        }
         if throttle { speed += Self.acceleration * dt }
         if brake {
             speed -= (speed > 0 ? Self.brakeDeceleration : Self.reverseAcceleration) * dt
         }
 
-        // The road has grip; leaving it slows the car down hard.
+        // The road has grip; leaving it slows the car down hard, and a
+        // sliding car scrubs some speed too.
         var drag = Self.rollingDrag
         if offRoad { drag += Self.offRoadDrag }
+        if isDrifting { drag += Self.driftDrag }
         speed -= drag * speed * dt
-        speed = max(-Self.maxReverseSpeed, min(speed, topSpeed))
+        if speed > effectiveTop {
+            // Bleed excess (e.g. right after a boost) instead of snapping.
+            speed = max(effectiveTop, speed - 1.0 * dt)
+        }
+        speed = max(-Self.maxReverseSpeed, speed)
 
-        // Yaw response grows with speed so the car can't pivot in place;
-        // in reverse it flips, like a real car backing up.
         let ratio = min(1, abs(speed) / Self.maxSpeed)
-        let grip = (0.25 + 0.75 * ratio) * (speed < 0 ? -1 : 1)
-        heading -= steering * 2.8 * grip * dt
-        return forward * speed * dt
+        if isDrifting {
+            driftCharge += dt
+            // Steering picks the drift line between shallow (counter-steer)
+            // and tight (full inside); it always keeps rotating some.
+            let inward = max(-1, min(1, steering * driftDirection))
+            let grip = 0.25 + 0.75 * ratio
+            let newSlip = slip + (0.25 - slip) * min(1, dt * 4)
+            // The nose rotates ahead by the growing slip angle while the
+            // travel direction follows the steered arc, so kicking the tail
+            // out doesn't push the car wide at corner entry.
+            heading -= driftDirection
+                * (3.8 * grip * (0.45 + 0.55 * inward) * dt + (newSlip - slip))
+            slip = newSlip
+        } else {
+            // Yaw response grows with speed so the car can't pivot in place;
+            // in reverse it flips, like a real car backing up.
+            let grip = (0.25 + 0.75 * ratio) * (speed < 0 ? -1 : 1)
+            heading -= steering * 2.8 * grip * dt
+            // Grip catches again: the travel direction converges onto the nose.
+            slip += (0 - slip) * min(1, dt * 4)
+        }
+
+        // While sliding, the car travels wider than its nose points.
+        let travelHeading = heading + driftDirection * slip
+        return SIMD3(sin(travelHeading), 0, cos(travelHeading)) * speed * dt
     }
 
     /// Scrubs off speed when hitting a wall: a glancing touch barely slows

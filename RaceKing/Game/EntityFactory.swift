@@ -122,6 +122,28 @@ enum EntityFactory {
                 car.addChild(wheel)
             }
         }
+
+        // Drift mini-turbo underglow and boost flame; RaceGame toggles these.
+        let glowMesh = MeshResource.generatePlane(width: 0.06, depth: 0.11, cornerRadius: 0.02)
+        let glowColors: [(name: String, color: SimpleMaterial.Color)] = [
+            ("glowBlue", .init(red: 0.25, green: 0.6, blue: 1.0, alpha: 1)),
+            ("glowOrange", .init(red: 1.0, green: 0.55, blue: 0.1, alpha: 1)),
+        ]
+        for glow in glowColors {
+            let entity = ModelEntity(mesh: glowMesh, materials: [UnlitMaterial(color: glow.color)])
+            entity.name = glow.name
+            entity.position.y = 0.005
+            entity.isEnabled = false
+            car.addChild(entity)
+        }
+        let flame = ModelEntity(
+            mesh: .generateBox(width: 0.014, height: 0.012, depth: 0.03, cornerRadius: 0.005),
+            materials: [UnlitMaterial(color: .init(red: 1.0, green: 0.55, blue: 0.1, alpha: 1))]
+        )
+        flame.name = "boostFlame"
+        flame.position = [0, 0.024, -0.06]
+        flame.isEnabled = false
+        car.addChild(flame)
         return car
     }
 
