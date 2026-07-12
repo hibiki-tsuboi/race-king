@@ -165,6 +165,37 @@ final class RaceGame {
         placeCarsOnGrid()
     }
 
+    /// Floor target for AR anchoring: any horizontal floor of 0.6 x 0.6 m+.
+    static var floorAnchorTarget: AnchoringComponent.Target {
+        .plane(.horizontal, classification: .floor, minimumBounds: [0.6, 0.6])
+    }
+
+    /// Anchors the course to the floor (called once from AR setup).
+    func installFloorAnchor() {
+        root.components.set(AnchoringComponent(Self.floorAnchorTarget))
+    }
+
+    /// Detaches the course and re-anchors it to the floor plane currently
+    /// in view — point the camera where the course should go first.
+    func reanchorCourse() {
+        guard phase == .ready, root.components.has(AnchoringComponent.self) else { return }
+        root.isEnabled = false
+        root.components.remove(AnchoringComponent.self)
+        Task { @MainActor in
+            // Give the anchoring system a beat to release the old plane.
+            try? await Task.sleep(for: .milliseconds(80))
+            root.components.set(AnchoringComponent(Self.floorAnchorTarget))
+            root.isEnabled = true
+        }
+    }
+
+    /// Spins the whole course a quarter turn on the floor, for rooms where
+    /// the long side doesn't match the anchor's orientation.
+    func rotateCourse() {
+        guard phase == .ready else { return }
+        root.orientation = simd_quatf(angle: .pi / 2, axis: [0, 1, 0]) * root.orientation
+    }
+
     /// Applies an imported car model to the player and ghost cars in place
     /// (nil restores the procedural kart). Safe to call mid-race.
     func setCustomCarModel(_ template: Entity?) {

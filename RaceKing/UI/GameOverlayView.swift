@@ -65,6 +65,27 @@ struct GameOverlayView: View {
                         .background(.red.gradient, in: Capsule())
                 }
                 .buttonStyle(.plain)
+
+                #if os(iOS) && !targetEnvironment(simulator)
+                HStack(spacing: 12) {
+                    Button {
+                        game.reanchorCourse()
+                    } label: {
+                        Label("コースを置き直す", systemImage: "arrow.triangle.2.circlepath")
+                    }
+                    Button {
+                        game.rotateCourse()
+                    } label: {
+                        Label("90°回転", systemImage: "rotate.right")
+                    }
+                }
+                .font(.footnote.bold())
+                .foregroundStyle(.white)
+                .buttonStyle(.plain)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(.black.opacity(0.45), in: Capsule())
+                #endif
             }
             // Sit above the circuit so the menu doesn't hide the grid.
             .offset(y: -150)

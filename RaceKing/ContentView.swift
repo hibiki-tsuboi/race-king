@@ -19,12 +19,9 @@ struct ContentView: View {
         ZStack {
             RealityView { content in
                 #if os(iOS) && !targetEnvironment(simulator)
-                // AR: show the real room and anchor the circuit to any floor
-                // surface that is at least 0.6 x 0.6 m.
+                // AR: show the real room and anchor the circuit to the floor.
                 content.camera = .spatialTracking
-                game.root.components.set(AnchoringComponent(
-                    .plane(.horizontal, classification: .floor, minimumBounds: [0.6, 0.6])
-                ))
+                game.installFloorAnchor()
                 #elseif os(macOS) || os(iOS) || os(tvOS)
                 // No AR passthrough here: fake a floor and look down at the circuit.
                 content.add(EntityFactory.makeFallbackGround())
