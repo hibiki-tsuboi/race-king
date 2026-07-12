@@ -8,6 +8,11 @@ import RealityKit
 
 struct ContentView: View {
     @State private var game = RaceGame()
+    @State private var audio = GameAudio()
+    #if os(iOS)
+    @State private var haptics = Haptics()
+    @State private var tilt = TiltSteering()
+    #endif
     @State private var updateSubscription: EventSubscription?
 
     var body: some View {
@@ -31,6 +36,7 @@ struct ContentView: View {
                 content.add(game.root)
                 updateSubscription = content.subscribe(to: SceneEvents.Update.self) { event in
                     game.update(deltaTime: event.deltaTime)
+                    audio.setEngine(speedRatio: game.speedRatio, running: game.isEngineRunning)
                 }
             }
             #if os(macOS) || (os(iOS) && targetEnvironment(simulator))
@@ -41,6 +47,27 @@ struct ContentView: View {
             GameOverlayView(game: game)
         }
         .persistentSystemOverlays(.hidden)
+        .task {
+            game.onEvent = { event in
+                audio.handle(event)
+                #if os(iOS)
+                haptics.handle(event)
+                #endif
+            }
+            updateTiltSteering()
+        }
+        .onChange(of: game.tiltSteeringEnabled) { updateTiltSteering() }
+    }
+
+    private func updateTiltSteering() {
+        #if os(iOS)
+        if game.tiltSteeringEnabled {
+            tilt.start { game.steeringInput = $0 }
+        } else {
+            tilt.stop()
+            game.steeringInput = 0
+        }
+        #endif
     }
 }
 

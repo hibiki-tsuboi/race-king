@@ -13,9 +13,11 @@ struct ControlsView: View {
 
     var body: some View {
         HStack(alignment: .bottom) {
-            HStack(spacing: 16) {
-                HoldButton(systemImage: "arrowtriangle.left.fill", size: 78, isPressed: $steerLeft)
-                HoldButton(systemImage: "arrowtriangle.right.fill", size: 78, isPressed: $steerRight)
+            if !game.tiltSteeringEnabled {
+                HStack(spacing: 16) {
+                    HoldButton(systemImage: "arrowtriangle.left.fill", size: 78, isPressed: $steerLeft)
+                    HoldButton(systemImage: "arrowtriangle.right.fill", size: 78, isPressed: $steerRight)
+                }
             }
             Spacer()
             HStack(alignment: .bottom, spacing: 16) {

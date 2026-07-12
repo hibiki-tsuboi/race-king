@@ -86,6 +86,32 @@ struct TrackLayout {
         return abs(sdf)
     }
 
+    /// Arc length of the centerline point closest to `point`, searched in a
+    /// window around a previous estimate. Returns a value in [0, totalLength).
+    func nearestS(to point: SIMD3<Float>, near hint: Float, window: Float = 0.4) -> Float {
+        let p = SIMD2(point.x, point.z)
+        var bestS = hint
+        var bestD = Float.greatestFiniteMagnitude
+        var s = hint - window
+        while s <= hint + window {
+            let q = sample(at: s).position
+            let d = simd_distance_squared(p, SIMD2(q.x, q.z))
+            if d < bestD { bestD = d; bestS = s }
+            s += 0.02
+        }
+        var normalized = bestS.truncatingRemainder(dividingBy: totalLength)
+        if normalized < 0 { normalized += totalLength }
+        return normalized
+    }
+
+    /// Signed shortest arc-length step between two points on the loop.
+    func progressDelta(from: Float, to: Float) -> Float {
+        var delta = (to - from).truncatingRemainder(dividingBy: totalLength)
+        if delta > totalLength / 2 { delta -= totalLength }
+        if delta < -totalLength / 2 { delta += totalLength }
+        return delta
+    }
+
     /// Ordered checkpoint positions; index 0 is the start/finish line.
     var checkpoints: [SIMD3<Float>] {
         (0..<checkpointCount).map { i in

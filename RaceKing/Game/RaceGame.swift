@@ -6,37 +6,83 @@
 import Foundation
 import Observation
 import RealityKit
+#if canImport(UIKit)
+import UIKit
+#elseif canImport(AppKit)
+import AppKit
+#endif
 
-/// Drives the whole race: owns the scene entities, integrates arcade car
-/// physics every frame, and tracks checkpoints, laps, and lap times.
+/// Gameplay moments other systems (audio, haptics) react to.
+enum GameEvent {
+    case countdownTick(Int)
+    case go
+    case lapCompleted(isBest: Bool)
+    case raceFinished(position: Int)
+    /// Periodic pulse while the player is off the road.
+    case offRoad
+}
+
+/// Drives the whole game: owns the scene entities, integrates car physics
+/// every frame, and runs the race state machine for both modes.
 @Observable
 final class RaceGame {
     enum Phase: Equatable {
-        /// Car on the grid, waiting for the player to start.
         case ready
         case countdown
         case racing
+        case finished
     }
+
+    enum Mode: String, CaseIterable {
+        case timeAttack
+        case race
+    }
+
+    /// Laps to the checkered flag in VS race mode.
+    static let raceLapTotal = 3
 
     // MARK: - State observed by the HUD
 
     private(set) var phase: Phase = .ready
-    /// Completed laps since the race started.
+    var mode: Mode = .timeAttack {
+        didSet {
+            guard phase == .ready, mode != oldValue else { return }
+            placeCarsOnGrid()
+        }
+    }
     private(set) var lapCount = 0
     private(set) var currentLapTime: TimeInterval = 0
     private(set) var lastLapTime: TimeInterval?
-    /// Best lap ever, persisted across launches.
+    /// Best lap ever (time attack), persisted across launches.
     private(set) var bestLapTime: TimeInterval?
     private(set) var countdownValue = 3
     /// Playful scaled speed for the HUD (the car itself moves at miniature scale).
     private(set) var displaySpeed = 0
+    /// Player rank (1-based) among all karts during a VS race.
+    private(set) var playerPosition = 1
+    /// Final rank once the player takes the checkered flag.
+    private(set) var finalPosition: Int?
+    /// Total elapsed time of the current VS race.
+    private(set) var raceTime: TimeInterval = 0
 
-    // MARK: - Player input (written by the touch controls)
+    // MARK: - Settings (persisted)
+
+    var ghostEnabled: Bool {
+        didSet { UserDefaults.standard.set(ghostEnabled, forKey: "ghostEnabled") }
+    }
+    var tiltSteeringEnabled: Bool {
+        didSet { UserDefaults.standard.set(tiltSteeringEnabled, forKey: "tiltSteering") }
+    }
+
+    // MARK: - Player input (written by touch controls or tilt)
 
     /// Steering in -1 (left) ... 1 (right).
     var steeringInput: Float = 0
     var throttleInput = false
     var brakeInput = false
+
+    /// Hook for audio and haptics.
+    var onEvent: ((GameEvent) -> Void)?
 
     // MARK: - Scene
 
@@ -44,31 +90,46 @@ final class RaceGame {
     /// Root of the game scene. On AR devices this gets anchored to the floor.
     let root = Entity()
     private let car: Entity
+    private let ghostCar: Entity
     private let checkpoints: [SIMD3<Float>]
+    private var aiDrivers: [AIDriver] = []
 
     /// Car pose in `root`'s space, for follow cameras and tests.
     var carPosition: SIMD3<Float> { car.position }
-    var carHeading: Float { heading }
+    var carHeading: Float { physics.heading }
+    var speedRatio: Float { physics.speed / CarPhysics.maxSpeed }
+    var isEngineRunning: Bool { phase == .countdown || phase == .racing }
 
     // MARK: - Simulation
 
-    private var speed: Float = 0
-    private var heading: Float = 0
-    private var steering: Float = 0
+    private var physics = CarPhysics()
     private var nextCheckpoint = 1
     private var countdownRemaining: TimeInterval = 0
+    private var ghost = GhostRecorder()
+    private var playerTrackS: Float = 0
+    private var playerProgress: Float = 0
+    private var aiFinishedCount = 0
+    private var offRoadPulse: TimeInterval = 0
 
     private static let bestLapKey = "bestLapTime"
 
     init() {
         car = EntityFactory.makeCar()
+        ghostCar = EntityFactory.makeCar(bodyColor: .init(white: 0.9, alpha: 1))
+        ghostCar.components.set(OpacityComponent(opacity: 0.35))
+        ghostCar.isEnabled = false
         checkpoints = layout.checkpoints
+        aiDrivers = AIDriver.defaultOpponents()
+        ghostEnabled = UserDefaults.standard.object(forKey: "ghostEnabled") as? Bool ?? true
+        tiltSteeringEnabled = UserDefaults.standard.bool(forKey: "tiltSteering")
+
         root.addChild(EntityFactory.makeTrack(layout: layout))
         root.addChild(car)
+        root.addChild(ghostCar)
 
         let savedBest = UserDefaults.standard.double(forKey: Self.bestLapKey)
         bestLapTime = savedBest > 0 ? savedBest : nil
-        placeCarOnGrid()
+        placeCarsOnGrid()
     }
 
     func startRace() {
@@ -76,6 +137,7 @@ final class RaceGame {
         countdownRemaining = 3
         countdownValue = 3
         phase = .countdown
+        onEvent?(.countdownTick(3))
     }
 
     func reset() {
@@ -83,95 +145,207 @@ final class RaceGame {
         lapCount = 0
         currentLapTime = 0
         lastLapTime = nil
+        raceTime = 0
         displaySpeed = 0
-        placeCarOnGrid()
+        playerPosition = 1
+        finalPosition = nil
+        aiFinishedCount = 0
+        ghostCar.isEnabled = false
+        placeCarsOnGrid()
     }
 
     /// Advances the game by one frame. Called from the scene's update event.
     func update(deltaTime: TimeInterval) {
+        let dt = Float(min(deltaTime, 1.0 / 20.0))
         switch phase {
         case .ready:
             break
         case .countdown:
             countdownRemaining -= deltaTime
-            countdownValue = max(1, Int(countdownRemaining.rounded(.up)))
+            let newValue = max(1, Int(countdownRemaining.rounded(.up)))
+            if newValue != countdownValue {
+                countdownValue = newValue
+                onEvent?(.countdownTick(newValue))
+            }
             if countdownRemaining <= 0 {
                 phase = .racing
                 currentLapTime = 0
+                ghost.beginLap()
+                onEvent?(.go)
             }
         case .racing:
             currentLapTime += deltaTime
-            stepCar(Float(min(deltaTime, 1.0 / 20.0)))
-            checkCheckpoints()
+            if mode == .race { raceTime += deltaTime }
+            stepPlayer(dt, deltaTime: deltaTime)
+            stepAI(dt)
+            separateCars()
+            updateGhost()
+            updateRanking()
+        case .finished:
+            // Let the field keep rolling past the flag.
+            car.position += physics.step(
+                dt: dt, steeringInput: 0, throttle: false, brake: true, offRoad: false
+            )
+            car.orientation = simd_quatf(angle: physics.heading, axis: [0, 1, 0])
+            stepAI(dt)
+            separateCars()
         }
     }
 
-    // MARK: - Car physics
+    // MARK: - Per-frame stepping
 
-    private func stepCar(_ dt: Float) {
-        let maxSpeed: Float = 0.65
-        let acceleration: Float = 0.55
-        let brakeDeceleration: Float = 1.4
-        let rollingDrag: Float = 0.35
-        let offTrackDrag: Float = 2.2
+    private func stepPlayer(_ dt: Float, deltaTime: TimeInterval) {
+        let offRoad = layout.distanceFromCenterline(car.position) > layout.roadWidth / 2 + 0.015
+        car.position += physics.step(
+            dt: dt, steeringInput: steeringInput,
+            throttle: throttleInput, brake: brakeInput, offRoad: offRoad
+        )
+        car.orientation = simd_quatf(angle: physics.heading, axis: [0, 1, 0])
+        displaySpeed = Int(physics.speed * 400)
 
-        // Ease the wheel toward the input so steering isn't twitchy.
-        steering += (steeringInput - steering) * min(1, dt * 10)
-
-        if throttleInput { speed += acceleration * dt }
-        if brakeInput { speed -= brakeDeceleration * dt }
-
-        // The road has grip; leaving it slows the car down hard.
-        var drag = rollingDrag
-        if layout.distanceFromCenterline(car.position) > layout.roadWidth / 2 + 0.015 {
-            drag += offTrackDrag
+        if offRoad {
+            offRoadPulse -= deltaTime
+            if offRoadPulse <= 0 {
+                onEvent?(.offRoad)
+                offRoadPulse = 0.15
+            }
+        } else {
+            offRoadPulse = 0
         }
-        speed -= drag * speed * dt
-        speed = max(0, min(speed, maxSpeed))
 
-        // Yaw response grows with speed so the car can't pivot in place.
-        let grip = 0.25 + 0.75 * (speed / maxSpeed)
-        heading -= steering * 2.8 * grip * dt
+        if mode == .timeAttack {
+            ghost.record(time: currentLapTime, position: car.position, heading: physics.heading)
+        }
+        checkPlayerCheckpoints()
+    }
 
-        car.orientation = simd_quatf(angle: heading, axis: [0, 1, 0])
-        let forward = SIMD3<Float>(sin(heading), 0, cos(heading))
-        car.position += forward * speed * dt
-        displaySpeed = Int(speed * 400)
+    private func stepAI(_ dt: Float) {
+        guard mode == .race else { return }
+        for driver in aiDrivers {
+            driver.drive(dt: dt, layout: layout)
+            if driver.updateLap(checkpoints: checkpoints),
+               driver.lapCount >= Self.raceLapTotal, !driver.finished {
+                driver.finished = true
+                aiFinishedCount += 1
+            }
+        }
+    }
+
+    /// Gently pushes overlapping karts apart (there is no hard collision).
+    private func separateCars() {
+        guard mode == .race else { return }
+        let cars = [car] + aiDrivers.map(\.entity)
+        let minGap: Float = 0.05
+        for i in 0..<cars.count {
+            for j in (i + 1)..<cars.count {
+                var delta = cars[j].position - cars[i].position
+                delta.y = 0
+                let distance = simd_length(delta)
+                guard distance > 1e-4, distance < minGap else { continue }
+                let push = delta / distance * ((minGap - distance) / 2)
+                cars[i].position -= push
+                cars[j].position += push
+            }
+        }
+    }
+
+    private func updateGhost() {
+        guard mode == .timeAttack, ghostEnabled,
+              let pose = ghost.best?.pose(at: currentLapTime) else {
+            ghostCar.isEnabled = false
+            return
+        }
+        ghostCar.isEnabled = true
+        ghostCar.position = pose.position
+        ghostCar.orientation = simd_quatf(angle: pose.heading, axis: [0, 1, 0])
+    }
+
+    private func updateRanking() {
+        guard mode == .race else { return }
+        let s = layout.nearestS(to: car.position, near: playerTrackS)
+        playerProgress += layout.progressDelta(from: playerTrackS, to: s)
+        playerTrackS = s
+        playerPosition = aiDrivers.count { $0.progress > playerProgress } + 1
     }
 
     // MARK: - Lap logic
 
-    private func placeCarOnGrid() {
-        let grid = layout.sample(at: layout.startOffset - 0.06)
-        car.position = grid.position
-        heading = TrackLayout.heading(of: grid.tangent)
-        car.orientation = simd_quatf(angle: heading, axis: [0, 1, 0])
-        speed = 0
-        steering = 0
-        nextCheckpoint = 1
-    }
-
-    /// Checkpoints must be hit in order; passing the start line (checkpoint 0)
-    /// after all others completes a lap. This blocks course cutting.
-    private func checkCheckpoints() {
-        let target = checkpoints[nextCheckpoint]
+    /// Advances `next` when `position` reaches its checkpoint; returns true
+    /// when the start line is crossed after all checkpoints (= lap complete).
+    /// Ordered checkpoints block course cutting.
+    static func advanceCheckpoint(
+        _ next: inout Int, position: SIMD3<Float>, checkpoints: [SIMD3<Float>]
+    ) -> Bool {
+        let target = checkpoints[next]
         let distance = simd_distance(
-            SIMD2(car.position.x, car.position.z), SIMD2(target.x, target.z)
+            SIMD2(position.x, position.z), SIMD2(target.x, target.z)
         )
-        guard distance < 0.13 else { return }
-        if nextCheckpoint == 0 {
-            completeLap()
-        }
-        nextCheckpoint = (nextCheckpoint + 1) % checkpoints.count
+        guard distance < 0.13 else { return false }
+        let completed = next == 0
+        next = (next + 1) % checkpoints.count
+        return completed
     }
 
-    private func completeLap() {
+    private func checkPlayerCheckpoints() {
+        guard Self.advanceCheckpoint(
+            &nextCheckpoint, position: car.position, checkpoints: checkpoints
+        ) else { return }
+
         lapCount += 1
         lastLapTime = currentLapTime
-        if bestLapTime.map({ currentLapTime < $0 }) ?? true {
-            bestLapTime = currentLapTime
-            UserDefaults.standard.set(currentLapTime, forKey: Self.bestLapKey)
+        switch mode {
+        case .timeAttack:
+            let isBest = bestLapTime.map { currentLapTime < $0 } ?? true
+            ghost.finishLap(duration: currentLapTime)
+            if isBest {
+                bestLapTime = currentLapTime
+                UserDefaults.standard.set(currentLapTime, forKey: Self.bestLapKey)
+            }
+            onEvent?(.lapCompleted(isBest: isBest))
+            currentLapTime = 0
+            ghost.beginLap()
+        case .race:
+            if lapCount >= Self.raceLapTotal {
+                let position = aiFinishedCount + 1
+                finalPosition = position
+                playerPosition = position
+                phase = .finished
+                onEvent?(.raceFinished(position: position))
+            } else {
+                onEvent?(.lapCompleted(isBest: false))
+                currentLapTime = 0
+            }
         }
-        currentLapTime = 0
+    }
+
+    // MARK: - Grid
+
+    private func placeCarsOnGrid() {
+        for driver in aiDrivers { driver.entity.removeFromParent() }
+        nextCheckpoint = 1
+
+        switch mode {
+        case .timeAttack:
+            placePlayer(back: 0.06, lateral: 0)
+        case .race:
+            let slots: [(back: Float, lateral: Float)] =
+                [(0.08, -0.037), (0.08, 0.037), (0.17, -0.037)]
+            for (driver, slot) in zip(aiDrivers, slots) {
+                driver.place(back: slot.back, lateral: slot.lateral, layout: layout)
+                root.addChild(driver.entity)
+            }
+            placePlayer(back: 0.17, lateral: 0.037)
+        }
+    }
+
+    private func placePlayer(back: Float, lateral: Float) {
+        let s = layout.startOffset - back
+        let grid = layout.sample(at: s)
+        let side = SIMD3<Float>(-grid.tangent.z, 0, grid.tangent.x)
+        car.position = grid.position + side * lateral
+        physics.reset(heading: TrackLayout.heading(of: grid.tangent))
+        car.orientation = simd_quatf(angle: physics.heading, axis: [0, 1, 0])
+        playerTrackS = layout.nearestS(to: car.position, near: s)
+        playerProgress = 0
     }
 }

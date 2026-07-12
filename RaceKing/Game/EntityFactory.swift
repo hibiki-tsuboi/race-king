@@ -73,9 +73,11 @@ enum EntityFactory {
     }
 
     /// A small kart-style car with its nose toward +Z.
-    static func makeCar() -> Entity {
+    static func makeCar(
+        bodyColor: SimpleMaterial.Color = .init(red: 0.9, green: 0.12, blue: 0.15, alpha: 1)
+    ) -> Entity {
         let car = Entity()
-        let body = SimpleMaterial(color: .init(red: 0.9, green: 0.12, blue: 0.15, alpha: 1), roughness: 0.35, isMetallic: false)
+        let body = SimpleMaterial(color: bodyColor, roughness: 0.35, isMetallic: false)
         let dark = SimpleMaterial(color: .init(white: 0.08, alpha: 1), roughness: 0.4, isMetallic: false)
 
         let chassis = ModelEntity(
