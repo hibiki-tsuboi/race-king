@@ -64,6 +64,8 @@ struct GameOverlayView: View {
                 }
                 .buttonStyle(.plain)
             }
+            // Sit above the circuit so the menu doesn't hide the grid.
+            .offset(y: -150)
         case .countdown:
             Text("\(game.countdownValue)")
                 .font(.system(size: 130, weight: .black, design: .rounded))

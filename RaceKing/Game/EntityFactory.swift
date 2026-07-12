@@ -83,47 +83,129 @@ enum EntityFactory {
         return track
     }
 
+    /// If a `PlayerCar.usdz` file exists in the app bundle it is used for the
+    /// player and ghost cars (AI karts keep the tintable procedural body).
+    private static let customCarTemplate: Entity? = try? Entity.load(named: "PlayerCar")
+
+    /// Yaw applied to a loaded USDZ so its nose points toward +Z.
+    /// Adjust when a custom model faces the wrong way (e.g. `.pi` for -Z).
+    static let customCarYawFix: Float = 0
+
     /// A small kart-style car with its nose toward +Z.
     static func makeCar(
-        bodyColor: SimpleMaterial.Color = .init(red: 0.9, green: 0.12, blue: 0.15, alpha: 1)
+        bodyColor: SimpleMaterial.Color = .init(red: 0.9, green: 0.12, blue: 0.15, alpha: 1),
+        allowCustomModel: Bool = true
     ) -> Entity {
         let car = Entity()
+        if allowCustomModel, let template = customCarTemplate {
+            car.addChild(normalizedCustomCar(from: template))
+        } else {
+            addProceduralKart(to: car, bodyColor: bodyColor)
+        }
+        addEffectAttachments(to: car)
+        return car
+    }
+
+    /// Clones and normalizes a custom model: ~9.5 cm long, resting on y = 0,
+    /// centered, nose toward +Z (after `customCarYawFix`).
+    private static func normalizedCustomCar(from template: Entity) -> Entity {
+        let model = template.clone(recursive: true)
+        let bounds = model.visualBounds(relativeTo: nil)
+        let footprint = max(bounds.extents.x, bounds.extents.z)
+        let scale = footprint > 0 ? 0.095 / footprint : 1
+        model.scale = SIMD3(repeating: scale)
+        model.position = [
+            -bounds.center.x * scale, -bounds.min.y * scale, -bounds.center.z * scale,
+        ]
+        let wrapper = Entity()
+        wrapper.orientation = simd_quatf(angle: customCarYawFix, axis: [0, 1, 0])
+        wrapper.addChild(model)
+        return wrapper
+    }
+
+    /// A low-poly racing kart built from primitives: wedge nose, wings,
+    /// helmeted driver, and two-tone wheels.
+    private static func addProceduralKart(to car: Entity, bodyColor: SimpleMaterial.Color) {
         let body = SimpleMaterial(color: bodyColor, roughness: 0.35, isMetallic: false)
         let dark = SimpleMaterial(color: .init(white: 0.08, alpha: 1), roughness: 0.4, isMetallic: false)
+        let darkGray = SimpleMaterial(color: .init(white: 0.2, alpha: 1), roughness: 0.5, isMetallic: false)
+        let silver = SimpleMaterial(color: .init(white: 0.75, alpha: 1), roughness: 0.25, isMetallic: true)
+        let white = SimpleMaterial(color: .white, roughness: 0.4, isMetallic: false)
+        let lamp = UnlitMaterial(color: .init(white: 0.98, alpha: 1))
 
-        let chassis = ModelEntity(
-            mesh: .generateBox(width: 0.045, height: 0.02, depth: 0.095, cornerRadius: 0.006),
-            materials: [body]
-        )
-        chassis.position.y = 0.02
-        car.addChild(chassis)
-
-        let cabin = ModelEntity(
-            mesh: .generateBox(width: 0.034, height: 0.016, depth: 0.036, cornerRadius: 0.005),
-            materials: [dark]
-        )
-        cabin.position = [0, 0.036, -0.008]
-        car.addChild(cabin)
-
-        let spoiler = ModelEntity(
-            mesh: .generateBox(width: 0.042, height: 0.004, depth: 0.012),
-            materials: [body]
-        )
-        spoiler.position = [0, 0.041, -0.045]
-        car.addChild(spoiler)
-
-        let wheelMesh = MeshResource.generateCylinder(height: 0.009, radius: 0.011)
-        let axleRotation = simd_quatf(angle: .pi / 2, axis: [0, 0, 1])
-        for x: Float in [-0.024, 0.024] {
-            for z: Float in [-0.032, 0.03] {
-                let wheel = ModelEntity(mesh: wheelMesh, materials: [dark])
-                wheel.position = [x, 0.011, z]
-                wheel.orientation = axleRotation
-                car.addChild(wheel)
-            }
+        func part(
+            _ mesh: MeshResource, _ material: SimpleMaterial,
+            at position: SIMD3<Float>, orientation: simd_quatf? = nil
+        ) {
+            let entity = ModelEntity(mesh: mesh, materials: [material])
+            entity.position = position
+            if let orientation { entity.orientation = orientation }
+            car.addChild(entity)
         }
 
-        // Drift mini-turbo underglow and boost flame; RaceGame toggles these.
+        // Chassis plate and main body, with a pitched-down wedge nose.
+        part(.generateBox(width: 0.048, height: 0.008, depth: 0.094, cornerRadius: 0.004),
+             dark, at: [0, 0.012, 0])
+        part(.generateBox(width: 0.04, height: 0.017, depth: 0.058, cornerRadius: 0.006),
+             body, at: [0, 0.0255, -0.014])
+        part(.generateBox(width: 0.028, height: 0.011, depth: 0.036, cornerRadius: 0.005),
+             body, at: [0, 0.021, 0.028],
+             orientation: simd_quatf(angle: 0.12, axis: [1, 0, 0]))
+
+        // Front wing, rear wing on struts.
+        part(.generateBox(width: 0.05, height: 0.0035, depth: 0.013, cornerRadius: 0.001),
+             body, at: [0, 0.0115, 0.044])
+        part(.generateBox(width: 0.048, height: 0.003, depth: 0.013, cornerRadius: 0.001),
+             body, at: [0, 0.044, -0.041])
+        for x: Float in [-0.014, 0.014] {
+            part(.generateBox(width: 0.0035, height: 0.012, depth: 0.0035),
+                 dark, at: [x, 0.036, -0.041])
+        }
+
+        // Cockpit with a helmeted driver.
+        part(.generateBox(width: 0.026, height: 0.006, depth: 0.03, cornerRadius: 0.003),
+             dark, at: [0, 0.036, -0.008])
+        part(.generateSphere(radius: 0.0085), white, at: [0, 0.04, -0.006])
+        part(.generateBox(width: 0.012, height: 0.0045, depth: 0.003, cornerRadius: 0.001),
+             dark, at: [0, 0.0405, 0.0015])
+
+        // Racing stripe, side pods, exhausts, headlights.
+        part(.generateBox(width: 0.009, height: 0.0008, depth: 0.055),
+             white, at: [0, 0.0348, -0.014])
+        for x: Float in [-0.0235, 0.0235] {
+            part(.generateBox(width: 0.009, height: 0.011, depth: 0.034, cornerRadius: 0.003),
+                 darkGray, at: [x, 0.017, -0.004])
+        }
+        let exhaustRotation = simd_quatf(angle: .pi / 2, axis: [1, 0, 0])
+        for x: Float in [-0.009, 0.009] {
+            part(.generateCylinder(height: 0.009, radius: 0.0028),
+                 silver, at: [x, 0.02, -0.049], orientation: exhaustRotation)
+        }
+        for x: Float in [-0.0085, 0.0085] {
+            let light = ModelEntity(
+                mesh: .generateBox(width: 0.005, height: 0.004, depth: 0.002, cornerRadius: 0.001),
+                materials: [lamp]
+            )
+            light.position = [x, 0.0215, 0.0465]
+            car.addChild(light)
+        }
+
+        // Two-tone wheels: black tires with bright hubs, bigger at the rear.
+        let axleRotation = simd_quatf(angle: .pi / 2, axis: [0, 0, 1])
+        let wheels: [(x: Float, z: Float, radius: Float, width: Float)] = [
+            (-0.026, -0.032, 0.0125, 0.011), (0.026, -0.032, 0.0125, 0.011),
+            (-0.0245, 0.031, 0.0105, 0.010), (0.0245, 0.031, 0.0105, 0.010),
+        ]
+        for wheel in wheels {
+            part(.generateCylinder(height: wheel.width, radius: wheel.radius),
+                 dark, at: [wheel.x, wheel.radius, wheel.z], orientation: axleRotation)
+            part(.generateCylinder(height: wheel.width + 0.0006, radius: wheel.radius * 0.48),
+                 silver, at: [wheel.x, wheel.radius, wheel.z], orientation: axleRotation)
+        }
+    }
+
+    /// Drift underglow and boost flame, toggled by the game via their names.
+    private static func addEffectAttachments(to car: Entity) {
         let glowMesh = MeshResource.generatePlane(width: 0.06, depth: 0.11, cornerRadius: 0.02)
         let glowColors: [(name: String, color: SimpleMaterial.Color)] = [
             ("glowBlue", .init(red: 0.25, green: 0.6, blue: 1.0, alpha: 1)),
@@ -141,10 +223,9 @@ enum EntityFactory {
             materials: [UnlitMaterial(color: .init(red: 1.0, green: 0.55, blue: 0.1, alpha: 1))]
         )
         flame.name = "boostFlame"
-        flame.position = [0, 0.024, -0.06]
+        flame.position = [0, 0.02, -0.058]
         flame.isEnabled = false
         car.addChild(flame)
-        return car
     }
 
     /// Grass-colored ground for platforms without AR passthrough

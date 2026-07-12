@@ -27,7 +27,9 @@ final class AIDriver {
     private var trackS: Float = 0
 
     init(bodyColor: SimpleMaterial.Color, topSpeed: Float) {
-        entity = EntityFactory.makeCar(bodyColor: bodyColor)
+        // AI karts stay procedural so each keeps its own tint even when a
+        // custom PlayerCar.usdz is installed.
+        entity = EntityFactory.makeCar(bodyColor: bodyColor, allowCustomModel: false)
         self.topSpeed = topSpeed
     }
 
