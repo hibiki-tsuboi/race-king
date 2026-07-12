@@ -115,7 +115,7 @@ final class RaceGame {
     private var physics = CarPhysics()
     private var nextCheckpoint = 1
     private var countdownRemaining: TimeInterval = 0
-    private var ghost = GhostRecorder()
+    private var ghost: GhostRecorder
     private var playerTrackS: Float = 0
     private var playerProgress: Float = 0
     private var aiFinishedCount = 0
@@ -138,10 +138,13 @@ final class RaceGame {
     private static let smokeMesh = MeshResource.generateSphere(radius: 0.0045)
     private static let smokeMaterial = UnlitMaterial(color: .init(white: 0.95, alpha: 1))
 
-    private static let bestLapKey = "bestLapTime"
+    /// Keyed by track length so records reset when the circuit changes.
+    private let bestLapKey: String
 
     init() {
         car = EntityFactory.makeCar()
+        ghost = GhostRecorder(trackLength: layout.totalLength)
+        bestLapKey = "bestLapTime-\(Int(layout.totalLength * 1000))"
         ghostCar = EntityFactory.makeCar(bodyColor: .init(white: 0.9, alpha: 1))
         ghostCar.components.set(OpacityComponent(opacity: 0.35))
         ghostCar.isEnabled = false
@@ -157,7 +160,7 @@ final class RaceGame {
         glowOrange = car.findEntity(named: "glowOrange")
         boostFlame = car.findEntity(named: "boostFlame")
 
-        let savedBest = UserDefaults.standard.double(forKey: Self.bestLapKey)
+        let savedBest = UserDefaults.standard.double(forKey: bestLapKey)
         bestLapTime = savedBest > 0 ? savedBest : nil
         placeCarsOnGrid()
     }
@@ -279,7 +282,7 @@ final class RaceGame {
         guard mode == .race else { return }
         for driver in aiDrivers {
             driver.drive(dt: dt, layout: layout)
-            if driver.updateLap(checkpoints: checkpoints),
+            if driver.updateLap(checkpoints: checkpoints, radius: layout.checkpointRadius),
                driver.lapCount >= Self.raceLapTotal, !driver.finished {
                 driver.finished = true
                 aiFinishedCount += 1
@@ -440,13 +443,14 @@ final class RaceGame {
     /// when the start line is crossed after all checkpoints (= lap complete).
     /// Ordered checkpoints block course cutting.
     static func advanceCheckpoint(
-        _ next: inout Int, position: SIMD3<Float>, checkpoints: [SIMD3<Float>]
+        _ next: inout Int, position: SIMD3<Float>, checkpoints: [SIMD3<Float>],
+        radius: Float
     ) -> Bool {
         let target = checkpoints[next]
         let distance = simd_distance(
             SIMD2(position.x, position.z), SIMD2(target.x, target.z)
         )
-        guard distance < 0.13 else { return false }
+        guard distance < radius else { return false }
         let completed = next == 0
         next = (next + 1) % checkpoints.count
         return completed
@@ -454,7 +458,8 @@ final class RaceGame {
 
     private func checkPlayerCheckpoints() {
         guard Self.advanceCheckpoint(
-            &nextCheckpoint, position: car.position, checkpoints: checkpoints
+            &nextCheckpoint, position: car.position, checkpoints: checkpoints,
+            radius: layout.checkpointRadius
         ) else { return }
 
         lapCount += 1
@@ -465,7 +470,7 @@ final class RaceGame {
             ghost.finishLap(duration: currentLapTime)
             if isBest {
                 bestLapTime = currentLapTime
-                UserDefaults.standard.set(currentLapTime, forKey: Self.bestLapKey)
+                UserDefaults.standard.set(currentLapTime, forKey: bestLapKey)
             }
             onEvent?(.lapCompleted(isBest: isBest))
             currentLapTime = 0

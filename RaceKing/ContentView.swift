@@ -29,7 +29,7 @@ struct ContentView: View {
                 // No AR passthrough here: fake a floor and look down at the circuit.
                 content.add(EntityFactory.makeFallbackGround())
                 let camera = Entity(components: PerspectiveCameraComponent())
-                camera.look(at: .zero, from: [0, 1.1, 1.5], relativeTo: nil)
+                camera.look(at: .zero, from: [0, 1.9, 2.4], relativeTo: nil)
                 content.add(camera)
                 #endif
 

@@ -103,8 +103,11 @@ struct CarPhysics {
         if offRoad { drag += Self.offRoadDrag }
         if isDrifting { drag += Self.driftDrag }
         speed -= drag * speed * dt
-        if speed > effectiveTop {
-            // Bleed excess (e.g. right after a boost) instead of snapping.
+        if boostTimer > 0 {
+            // The boost cap is a hard ceiling while it lasts.
+            speed = min(speed, effectiveTop)
+        } else if speed > effectiveTop {
+            // After the boost expires, bleed the excess instead of snapping.
             speed = max(effectiveTop, speed - 1.0 * dt)
         }
         speed = max(-Self.maxReverseSpeed, speed)

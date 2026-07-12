@@ -85,9 +85,10 @@ final class AIDriver {
     }
 
     /// Returns true when the kart just completed a lap.
-    func updateLap(checkpoints: [SIMD3<Float>]) -> Bool {
+    func updateLap(checkpoints: [SIMD3<Float>], radius: Float) -> Bool {
         guard RaceGame.advanceCheckpoint(
-            &nextCheckpoint, position: entity.position, checkpoints: checkpoints
+            &nextCheckpoint, position: entity.position, checkpoints: checkpoints,
+            radius: radius
         ) else { return false }
         lapCount += 1
         return true

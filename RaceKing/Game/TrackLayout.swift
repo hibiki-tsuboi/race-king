@@ -9,15 +9,18 @@ import simd
 /// centered at the origin. Distances are in meters (real-world AR scale).
 struct TrackLayout {
     /// Half extent of the centerline along X, including the corner radius.
-    var halfX: Float = 0.5
+    var halfX: Float = 0.75
     /// Half extent of the centerline along Z, including the corner radius.
-    var halfZ: Float = 0.35
+    var halfZ: Float = 0.52
     /// Corner radius of the centerline.
-    var cornerRadius: Float = 0.2
+    var cornerRadius: Float = 0.3
     /// Width of the paved road.
-    var roadWidth: Float = 0.16
+    var roadWidth: Float = 0.24
     /// Number of ordered checkpoints the car must pass to complete a lap.
     var checkpointCount = 8
+
+    /// How close the car must come to a checkpoint to collect it.
+    var checkpointRadius: Float { roadWidth / 2 + 0.05 }
 
     /// Length of the two straights that run along X.
     var straightX: Float { 2 * (halfX - cornerRadius) }
