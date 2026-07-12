@@ -83,9 +83,24 @@ enum EntityFactory {
         return track
     }
 
-    /// If a `PlayerCar.usdz` file exists in the app bundle it is used for the
-    /// player and ghost cars (AI karts keep the tintable procedural body).
-    private static let customCarTemplate: Entity? = try? Entity.load(named: "PlayerCar")
+    static let playerBodyColor = SimpleMaterial.Color(red: 0.9, green: 0.12, blue: 0.15, alpha: 1)
+    static let ghostBodyColor = SimpleMaterial.Color(white: 0.9, alpha: 1)
+
+    /// Where a car model imported from the Files app is kept across launches.
+    static var importedCarURL: URL {
+        let directory = URL.applicationSupportDirectory
+            .appending(path: "RaceKing", directoryHint: .isDirectory)
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        return directory.appending(path: "PlayerCar.usdz")
+    }
+
+    /// Custom model for the player and ghost cars (AI karts keep the
+    /// tintable procedural body). An imported file wins over a bundled
+    /// `PlayerCar.usdz`; nil falls back to the procedural kart.
+    static var customCarTemplate: Entity? = {
+        if let imported = try? Entity.load(contentsOf: importedCarURL) { return imported }
+        return try? Entity.load(named: "PlayerCar")
+    }()
 
     /// Yaw applied to a loaded USDZ so its nose points toward +Z.
     /// Adjust when a custom model faces the wrong way (e.g. `.pi` for -Z).
@@ -93,17 +108,24 @@ enum EntityFactory {
 
     /// A small kart-style car with its nose toward +Z.
     static func makeCar(
-        bodyColor: SimpleMaterial.Color = .init(red: 0.9, green: 0.12, blue: 0.15, alpha: 1),
+        bodyColor: SimpleMaterial.Color = playerBodyColor,
         allowCustomModel: Bool = true
     ) -> Entity {
         let car = Entity()
-        if allowCustomModel, let template = customCarTemplate {
-            car.addChild(normalizedCustomCar(from: template))
+        populate(car, bodyColor: bodyColor, customTemplate: allowCustomModel ? customCarTemplate : nil)
+        return car
+    }
+
+    /// Replaces a car's body (custom model or procedural kart) in place,
+    /// keeping the entity itself — and therefore its transform — intact.
+    static func populate(_ car: Entity, bodyColor: SimpleMaterial.Color, customTemplate: Entity?) {
+        for child in Array(car.children) { child.removeFromParent() }
+        if let customTemplate {
+            car.addChild(normalizedCustomCar(from: customTemplate))
         } else {
             addProceduralKart(to: car, bodyColor: bodyColor)
         }
         addEffectAttachments(to: car)
-        return car
     }
 
     /// Clones and normalizes a custom model: ~9.5 cm long, resting on y = 0,
@@ -113,7 +135,9 @@ enum EntityFactory {
         let bounds = model.visualBounds(relativeTo: nil)
         let footprint = max(bounds.extents.x, bounds.extents.z)
         let scale = footprint > 0 ? 0.095 / footprint : 1
-        model.scale = SIMD3(repeating: scale)
+        // Multiply rather than assign: USD files carry their unit conversion
+        // (metersPerUnit) as a root scale that must be preserved.
+        model.scale *= SIMD3(repeating: scale)
         model.position = [
             -bounds.center.x * scale, -bounds.min.y * scale, -bounds.center.z * scale,
         ]

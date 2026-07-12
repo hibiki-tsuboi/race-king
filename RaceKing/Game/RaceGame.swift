@@ -145,7 +145,7 @@ final class RaceGame {
         car = EntityFactory.makeCar()
         ghost = GhostRecorder(trackLength: layout.totalLength)
         bestLapKey = "bestLapTime-\(Int(layout.totalLength * 1000))"
-        ghostCar = EntityFactory.makeCar(bodyColor: .init(white: 0.9, alpha: 1))
+        ghostCar = EntityFactory.makeCar(bodyColor: EntityFactory.ghostBodyColor)
         ghostCar.components.set(OpacityComponent(opacity: 0.35))
         ghostCar.isEnabled = false
         checkpoints = layout.checkpoints
@@ -163,6 +163,16 @@ final class RaceGame {
         let savedBest = UserDefaults.standard.double(forKey: bestLapKey)
         bestLapTime = savedBest > 0 ? savedBest : nil
         placeCarsOnGrid()
+    }
+
+    /// Applies an imported car model to the player and ghost cars in place
+    /// (nil restores the procedural kart). Safe to call mid-race.
+    func setCustomCarModel(_ template: Entity?) {
+        EntityFactory.populate(car, bodyColor: EntityFactory.playerBodyColor, customTemplate: template)
+        EntityFactory.populate(ghostCar, bodyColor: EntityFactory.ghostBodyColor, customTemplate: template)
+        glowBlue = car.findEntity(named: "glowBlue")
+        glowOrange = car.findEntity(named: "glowOrange")
+        boostFlame = car.findEntity(named: "boostFlame")
     }
 
     func startRace() {

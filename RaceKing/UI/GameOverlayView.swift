@@ -4,6 +4,8 @@
 //
 
 import SwiftUI
+import RealityKit
+import UniformTypeIdentifiers
 
 /// HUD, touch controls, countdown, mode select, and results layered over the AR view.
 struct GameOverlayView: View {
@@ -115,8 +117,35 @@ struct GameOverlayView: View {
 /// Lap counter, timers, race position, and settings along the top edge.
 struct HUDView: View {
     @Bindable var game: RaceGame
+    @State private var showingCarImporter = false
+    @State private var importErrorMessage: String?
 
     var body: some View {
+        hudContent
+        #if !os(tvOS)
+            .fileImporter(
+                isPresented: $showingCarImporter,
+                allowedContentTypes: [.usdz]
+            ) { result in
+                if case .success(let url) = result {
+                    importCarModel(from: url)
+                }
+            }
+            .alert(
+                "モデルを読み込めませんでした",
+                isPresented: Binding(
+                    get: { importErrorMessage != nil },
+                    set: { if !$0 { importErrorMessage = nil } }
+                )
+            ) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(importErrorMessage ?? "")
+            }
+        #endif
+    }
+
+    private var hudContent: some View {
         HStack(alignment: .top) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(lapLabel)
@@ -165,6 +194,17 @@ struct HUDView: View {
                         Toggle("傾きで操作", isOn: $game.tiltSteeringEnabled)
                         #endif
                         Toggle("ゴースト表示", isOn: $game.ghostEnabled)
+                        #if !os(tvOS)
+                        Divider()
+                        Button {
+                            showingCarImporter = true
+                        } label: {
+                            Label("車の3Dモデルを読み込む…", systemImage: "square.and.arrow.down")
+                        }
+                        if EntityFactory.customCarTemplate != nil {
+                            Button("標準の車に戻す") { revertCarModel() }
+                        }
+                        #endif
                     } label: {
                         Image(systemName: "gearshape.fill")
                             .font(.title3.bold())
@@ -191,6 +231,33 @@ struct HUDView: View {
             return "LAP \(current)/\(RaceGame.raceLapTotal)"
         }
     }
+
+    #if !os(tvOS)
+    /// Copies the picked USDZ into app storage and applies it immediately.
+    private func importCarModel(from url: URL) {
+        let accessing = url.startAccessingSecurityScopedResource()
+        defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+
+        let destination = EntityFactory.importedCarURL
+        do {
+            try? FileManager.default.removeItem(at: destination)
+            try FileManager.default.copyItem(at: url, to: destination)
+            let template = try Entity.load(contentsOf: destination)
+            EntityFactory.customCarTemplate = template
+            game.setCustomCarModel(template)
+        } catch {
+            try? FileManager.default.removeItem(at: destination)
+            importErrorMessage = error.localizedDescription
+        }
+    }
+
+    private func revertCarModel() {
+        try? FileManager.default.removeItem(at: EntityFactory.importedCarURL)
+        let bundled = try? Entity.load(named: "PlayerCar")
+        EntityFactory.customCarTemplate = bundled
+        game.setCustomCarModel(bundled)
+    }
+    #endif
 }
 
 func lapTimeString(_ time: TimeInterval) -> String {
