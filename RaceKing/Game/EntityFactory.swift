@@ -31,6 +31,12 @@ enum EntityFactory {
         let curbMesh = MeshResource.generateBox(
             width: 0.018, height: 0.0035, depth: segmentLength * 1.35
         )
+        // Walls need extra overlap: the outer corner arc is longer than the
+        // centerline arc, so segments spread apart there.
+        let wallMesh = MeshResource.generateBox(
+            width: 0.008, height: 0.018, depth: segmentLength * 1.8
+        )
+        let barrier = SimpleMaterial(color: .init(white: 0.92, alpha: 1), roughness: 0.5, isMetallic: false)
         for i in 0..<segments {
             let s = (Float(i) + 0.5) * segmentLength
             let (position, tangent) = layout.sample(at: s)
@@ -41,12 +47,17 @@ enum EntityFactory {
             piece.orientation = rotation
             track.addChild(piece)
 
-            let lateral = rotation.act([1, 0, 0]) * (layout.roadWidth / 2)
+            let right = rotation.act([1, 0, 0])
             for side: Float in [-1, 1] {
                 let curb = ModelEntity(mesh: curbMesh, materials: [i.isMultiple(of: 2) ? red : white])
-                curb.position = position + lateral * side + [0, 0.0018, 0]
+                curb.position = position + right * (layout.roadWidth / 2) * side + [0, 0.0018, 0]
                 curb.orientation = rotation
                 track.addChild(curb)
+
+                let wall = ModelEntity(mesh: wallMesh, materials: [barrier])
+                wall.position = position + right * layout.wallOffset * side + [0, 0.009, 0]
+                wall.orientation = rotation
+                track.addChild(wall)
             }
         }
 

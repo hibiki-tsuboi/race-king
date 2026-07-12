@@ -123,6 +123,8 @@ final class GameAudio {
             }
         case .offRoad:
             beep(frequency: 110, duration: 0.06, amplitude: 0.35)
+        case .wallHit:
+            beep(frequency: 85, duration: 0.09, amplitude: 0.6)
         }
     }
 

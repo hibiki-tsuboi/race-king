@@ -20,6 +20,8 @@ enum GameEvent {
     case raceFinished(position: Int)
     /// Periodic pulse while the player is off the road.
     case offRoad
+    /// The player bumped a barrier wall hard.
+    case wallHit
 }
 
 /// Drives the whole game: owns the scene entities, integrates car physics
@@ -110,6 +112,7 @@ final class RaceGame {
     private var playerProgress: Float = 0
     private var aiFinishedCount = 0
     private var offRoadPulse: TimeInterval = 0
+    private var wallHitCooldown: TimeInterval = 0
 
     private static let bestLapKey = "bestLapTime"
 
@@ -189,6 +192,7 @@ final class RaceGame {
                 brake: physics.speed > 0.01, offRoad: false
             )
             car.orientation = simd_quatf(angle: physics.heading, axis: [0, 1, 0])
+            collidePlayerWithWalls()
             stepAI(dt)
             separateCars()
         }
@@ -203,6 +207,13 @@ final class RaceGame {
             throttle: throttleInput, brake: brakeInput, offRoad: offRoad
         )
         car.orientation = simd_quatf(angle: physics.heading, axis: [0, 1, 0])
+
+        let impact = collidePlayerWithWalls()
+        wallHitCooldown -= deltaTime
+        if impact > 0.25, wallHitCooldown <= 0 {
+            onEvent?(.wallHit)
+            wallHitCooldown = 0.3
+        }
         displaySpeed = Int(abs(physics.speed) * 400)
 
         if offRoad {
@@ -231,6 +242,18 @@ final class RaceGame {
                 aiFinishedCount += 1
             }
         }
+    }
+
+    /// Keeps the player between the barrier walls: projects the car back
+    /// inside the corridor and scrubs speed. Returns impact strength 0...1.
+    @discardableResult
+    private func collidePlayerWithWalls() -> Float {
+        let offset = layout.signedOffset(car.position)
+        let limit = layout.corridorLimit
+        guard abs(offset) > limit else { return 0 }
+        let normal = layout.lateralNormal(at: car.position)
+        car.position += normal * (max(-limit, min(limit, offset)) - offset)
+        return physics.hitWall(normal: normal)
     }
 
     /// Gently pushes overlapping karts apart (there is no hard collision).

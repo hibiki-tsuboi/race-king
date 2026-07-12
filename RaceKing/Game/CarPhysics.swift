@@ -54,4 +54,12 @@ struct CarPhysics {
         heading -= steering * 2.8 * grip * dt
         return forward * speed * dt
     }
+
+    /// Scrubs off speed when hitting a wall: a glancing touch barely slows
+    /// the car, a head-on hit nearly stops it. Returns impact 0...1.
+    mutating func hitWall(normal: SIMD3<Float>) -> Float {
+        let impact = abs(simd_dot(forward, normal))
+        speed *= max(0, 1 - 0.9 * impact)
+        return impact
+    }
 }

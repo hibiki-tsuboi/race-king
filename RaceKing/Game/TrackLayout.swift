@@ -77,13 +77,36 @@ struct TrackLayout {
         return (position, tangent)
     }
 
-    /// Distance from a point to the centerline loop, using the signed-distance
-    /// field of a rounded rectangle (the centerline is its zero level set).
-    func distanceFromCenterline(_ point: SIMD3<Float>) -> Float {
+    /// Lateral offset of the barrier walls from the centerline.
+    var wallOffset: Float { roadWidth / 2 + 0.055 }
+    /// How far the car's center may stray from the centerline before the
+    /// walls stop it (leaves room for the car body against the wall face).
+    var corridorLimit: Float { wallOffset - 0.035 }
+
+    /// Signed offset from the centerline loop, using the signed-distance
+    /// field of a rounded rectangle: negative toward the infield, zero on
+    /// the centerline, positive toward the outside.
+    func signedOffset(_ point: SIMD3<Float>) -> Float {
         let q = SIMD2(abs(point.x), abs(point.z))
             - SIMD2(halfX, halfZ) + SIMD2(repeating: cornerRadius)
-        let sdf = simd_length(simd_max(q, .zero)) + min(max(q.x, q.y), 0) - cornerRadius
-        return abs(sdf)
+        return simd_length(simd_max(q, .zero)) + min(max(q.x, q.y), 0) - cornerRadius
+    }
+
+    /// Distance from a point to the centerline loop.
+    func distanceFromCenterline(_ point: SIMD3<Float>) -> Float {
+        abs(signedOffset(point))
+    }
+
+    /// Unit direction of increasing signed offset (toward the outside),
+    /// from a numerical gradient in the XZ plane.
+    func lateralNormal(at point: SIMD3<Float>) -> SIMD3<Float> {
+        let e: Float = 0.005
+        let dx = signedOffset(point + [e, 0, 0]) - signedOffset(point - [e, 0, 0])
+        let dz = signedOffset(point + [0, 0, e]) - signedOffset(point - [0, 0, e])
+        let normal = SIMD3<Float>(dx, 0, dz)
+        let length = simd_length(normal)
+        guard length > 1e-6 else { return .zero }
+        return normal / length
     }
 
     /// Arc length of the centerline point closest to `point`, searched in a

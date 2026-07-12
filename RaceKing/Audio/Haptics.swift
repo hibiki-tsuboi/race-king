@@ -11,6 +11,7 @@ final class Haptics {
     private let light = UIImpactFeedbackGenerator(style: .light)
     private let medium = UIImpactFeedbackGenerator(style: .medium)
     private let heavy = UIImpactFeedbackGenerator(style: .heavy)
+    private let rigid = UIImpactFeedbackGenerator(style: .rigid)
     private let notification = UINotificationFeedbackGenerator()
 
     func handle(_ event: GameEvent) {
@@ -29,6 +30,8 @@ final class Haptics {
             notification.notificationOccurred(.success)
         case .offRoad:
             light.impactOccurred(intensity: 0.7)
+        case .wallHit:
+            rigid.impactOccurred()
         }
     }
 }

@@ -73,6 +73,15 @@ final class AIDriver {
             offRoad: offRoad, topSpeed: topSpeed
         )
         entity.orientation = simd_quatf(angle: physics.heading, axis: [0, 1, 0])
+
+        // The walls stop AI karts too (e.g. when shoved by another kart).
+        let offset = layout.signedOffset(entity.position)
+        let limit = layout.corridorLimit
+        if abs(offset) > limit {
+            let normal = layout.lateralNormal(at: entity.position)
+            entity.position += normal * (max(-limit, min(limit, offset)) - offset)
+            _ = physics.hitWall(normal: normal)
+        }
     }
 
     /// Returns true when the kart just completed a lap.
