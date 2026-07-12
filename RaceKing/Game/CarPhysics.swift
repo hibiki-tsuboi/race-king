@@ -127,9 +127,11 @@ struct CarPhysics {
                 * (3.8 * grip * (0.45 + 0.55 * inward) * dt + (newSlip - slip))
             slip = newSlip
         } else {
-            // Yaw response grows with speed so the car can't pivot in place;
-            // in reverse it flips, like a real car backing up.
-            let grip = (0.25 + 0.75 * ratio) * (speed < 0 ? -1 : 1)
+            // Yaw comes from rolling: it grows with speed, fades to zero at
+            // a standstill (a parked car can't pivot), and flips in reverse
+            // like a real car backing up.
+            let rolling = min(1, abs(speed) / 0.1)
+            let grip = (0.25 + 0.75 * ratio) * rolling * (speed < 0 ? -1 : 1)
             heading -= steering * 2.8 * grip * dt
             // Grip catches again: the travel direction converges onto the nose.
             slip += (0 - slip) * min(1, dt * 4)
