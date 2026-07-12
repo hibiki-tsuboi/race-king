@@ -3,6 +3,7 @@
 //  RaceKing
 //
 
+import Foundation
 import RealityKit
 #if canImport(UIKit)
 import UIKit
@@ -102,9 +103,11 @@ enum EntityFactory {
         return try? Entity.load(named: "PlayerCar")
     }()
 
-    /// Yaw applied to a loaded USDZ so its nose points toward +Z.
-    /// Adjust when a custom model faces the wrong way (e.g. `.pi` for -Z).
-    static let customCarYawFix: Float = 0
+    /// User override for when nose auto-detection guesses wrong; persisted.
+    static var customCarFlipped: Bool {
+        get { UserDefaults.standard.bool(forKey: "customCarFlipped") }
+        set { UserDefaults.standard.set(newValue, forKey: "customCarFlipped") }
+    }
 
     /// A small kart-style car with its nose toward +Z.
     static func makeCar(
@@ -142,9 +145,73 @@ enum EntityFactory {
             -bounds.center.x * scale, -bounds.min.y * scale, -bounds.center.z * scale,
         ]
         let wrapper = Entity()
-        wrapper.orientation = simd_quatf(angle: customCarYawFix, axis: [0, 1, 0])
+        let yaw = detectForwardYaw(of: model) + (customCarFlipped ? .pi : 0)
+        wrapper.orientation = simd_quatf(angle: yaw, axis: [0, 1, 0])
         wrapper.addChild(model)
         return wrapper
+    }
+
+    /// Guesses the yaw that points an imported car's nose toward +Z by
+    /// sampling mesh vertices: the longer horizontal axis is the length,
+    /// and the lower of its two ends is assumed to be the nose (cars carry
+    /// their cabin and wing height at the rear).
+    static func detectForwardYaw(of entity: Entity) -> Float {
+        let points = sampleVertices(of: entity)
+        guard points.count >= 8 else { return 0 }
+
+        var minPoint = points[0]
+        var maxPoint = points[0]
+        for point in points {
+            minPoint = simd_min(minPoint, point)
+            maxPoint = simd_max(maxPoint, point)
+        }
+        let extents = maxPoint - minPoint
+        let lengthAxisIsX = extents.x > extents.z
+
+        // Compare the tallest geometry within the outer 35% of each end.
+        let low = lengthAxisIsX ? minPoint.x : minPoint.z
+        let high = lengthAxisIsX ? maxPoint.x : maxPoint.z
+        let margin = (high - low) * 0.35
+        var positiveEndTop = -Float.greatestFiniteMagnitude
+        var negativeEndTop = -Float.greatestFiniteMagnitude
+        for point in points {
+            let along = lengthAxisIsX ? point.x : point.z
+            if along > high - margin {
+                positiveEndTop = max(positiveEndTop, point.y)
+            } else if along < low + margin {
+                negativeEndTop = max(negativeEndTop, point.y)
+            }
+        }
+        let noseAtPositiveEnd = positiveEndTop <= negativeEndTop
+
+        if lengthAxisIsX {
+            // Map the model's +X (or -X) to the game's +Z forward.
+            return noseAtPositiveEnd ? -.pi / 2 : .pi / 2
+        }
+        return noseAtPositiveEnd ? 0 : .pi
+    }
+
+    /// Root-space positions of up to a few hundred vertices per mesh part.
+    private static func sampleVertices(of root: Entity) -> [SIMD3<Float>] {
+        var points: [SIMD3<Float>] = []
+        func visit(_ entity: Entity) {
+            if let model = entity.components[ModelComponent.self] {
+                for meshModel in model.mesh.contents.models {
+                    for part in meshModel.parts {
+                        let positions = part.positions.elements
+                        let stride = max(1, positions.count / 400)
+                        var index = 0
+                        while index < positions.count {
+                            points.append(entity.convert(position: positions[index], to: root))
+                            index += stride
+                        }
+                    }
+                }
+            }
+            for child in entity.children { visit(child) }
+        }
+        visit(root)
+        return points
     }
 
     /// A low-poly racing kart built from primitives: wedge nose, wings,

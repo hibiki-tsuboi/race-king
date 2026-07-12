@@ -202,6 +202,12 @@ struct HUDView: View {
                             Label("車の3Dモデルを読み込む…", systemImage: "square.and.arrow.down")
                         }
                         if EntityFactory.customCarTemplate != nil {
+                            Button {
+                                EntityFactory.customCarFlipped.toggle()
+                                game.setCustomCarModel(EntityFactory.customCarTemplate)
+                            } label: {
+                                Label("車の前後を反転", systemImage: "arrow.left.arrow.right")
+                            }
                             Button("標準の車に戻す") { revertCarModel() }
                         }
                         #endif
@@ -243,6 +249,7 @@ struct HUDView: View {
             try? FileManager.default.removeItem(at: destination)
             try FileManager.default.copyItem(at: url, to: destination)
             let template = try Entity.load(contentsOf: destination)
+            EntityFactory.customCarFlipped = false
             EntityFactory.customCarTemplate = template
             game.setCustomCarModel(template)
         } catch {
