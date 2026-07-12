@@ -128,9 +128,10 @@ struct GameOverlayView: View {
                 }
                 .buttonStyle(.plain)
         }
-        // Sit above the circuit so the menu doesn't hide the grid
-        // or the placement reticle at the screen center.
-        .offset(y: -150)
+        // Anchored below the HUD instead of screen-centered, so it never
+        // collides with the HUD on small screens and leaves the grid visible.
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .padding(.top, 170)
     }
 }
 
@@ -146,6 +147,7 @@ struct HUDView: View {
     @State private var showingCarImporter = false
     @State private var importSlot: CarImportSlot = .player
     @State private var importErrorMessage: String?
+    @State private var isImportingCar = false
 
     var body: some View {
         hudContent
@@ -258,12 +260,21 @@ struct HUDView: View {
                             Button("すべて標準の車に戻す") { revertCarModels() }
                         }
                     } label: {
-                        Image(systemName: "gearshape.fill")
-                            .font(.title3.bold())
-                            .padding(10)
-                            .background(.black.opacity(0.45), in: Circle())
+                        Group {
+                            if isImportingCar {
+                                ProgressView()
+                                    .tint(.white)
+                                    .font(.title3)
+                            } else {
+                                Image(systemName: "gearshape.fill")
+                                    .font(.title3.bold())
+                            }
+                        }
+                        .padding(10)
+                        .background(.black.opacity(0.45), in: Circle())
                     }
                     .buttonStyle(.plain)
+                    .disabled(isImportingCar)
                 }
                 Text("\(game.displaySpeed) km/h")
                     .font(.title3.weight(.heavy))
@@ -290,7 +301,8 @@ struct HUDView: View {
     }
 
     /// Copies the picked USDZ into app storage and applies it to the car
-    /// slot the user chose in the menu.
+    /// slot the user chose in the menu. Loading runs asynchronously so a
+    /// heavy model can't freeze the UI.
     private func importCarModel(from url: URL) {
         let accessing = url.startAccessingSecurityScopedResource()
         defer { if accessing { url.stopAccessingSecurityScopedResource() } }
@@ -303,19 +315,30 @@ struct HUDView: View {
         do {
             try? FileManager.default.removeItem(at: destination)
             try FileManager.default.copyItem(at: url, to: destination)
-            let template = try Entity.load(contentsOf: destination)
-            switch importSlot {
-            case .player:
-                EntityFactory.customCarFlipped = false
-                EntityFactory.customCarTemplate = template
-                game.setCustomCarModel(template)
-            case .ai(let index):
-                EntityFactory.aiCarTemplates[index] = template
-                game.setAICarModel(template, at: index)
-            }
         } catch {
-            try? FileManager.default.removeItem(at: destination)
             importErrorMessage = error.localizedDescription
+            return
+        }
+
+        isImportingCar = true
+        let slot = importSlot
+        Task {
+            do {
+                let template = try await Entity(contentsOf: destination)
+                switch slot {
+                case .player:
+                    EntityFactory.customCarFlipped = false
+                    EntityFactory.customCarTemplate = template
+                    game.setCustomCarModel(template)
+                case .ai(let index):
+                    EntityFactory.aiCarTemplates[index] = template
+                    game.setAICarModel(template, at: index)
+                }
+            } catch {
+                try? FileManager.default.removeItem(at: destination)
+                importErrorMessage = error.localizedDescription
+            }
+            isImportingCar = false
         }
     }
 
