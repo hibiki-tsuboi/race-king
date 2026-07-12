@@ -5,6 +5,9 @@
 
 import AVFoundation
 import os
+#if canImport(UIKit) && !os(watchOS)
+import UIKit
+#endif
 
 /// Procedural game audio: an engine tone that follows the car's speed plus
 /// short beeps for countdown, laps, and results. No sound assets required.
@@ -104,6 +107,42 @@ final class GameAudio {
         engine.attach(node)
         engine.connect(node, to: engine.mainMixerNode, format: format)
         engine.mainMixerNode.outputVolume = 0.6
+        try? engine.start()
+        installRecoveryObservers()
+    }
+
+    /// Restarts the engine after phone calls, route changes (headphones),
+    /// and returning from the background — it stops silently otherwise.
+    private func installRecoveryObservers() {
+        let center = NotificationCenter.default
+        center.addObserver(
+            forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.restartEngineIfNeeded() }
+        }
+        #if os(iOS) || os(tvOS) || os(visionOS)
+        center.addObserver(
+            forName: AVAudioSession.interruptionNotification, object: nil, queue: .main
+        ) { [weak self] notification in
+            let rawType = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt
+            guard rawType.flatMap(AVAudioSession.InterruptionType.init) == .ended else { return }
+            MainActor.assumeIsolated { self?.restartEngineIfNeeded() }
+        }
+        #endif
+        #if canImport(UIKit) && !os(watchOS)
+        center.addObserver(
+            forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.restartEngineIfNeeded() }
+        }
+        #endif
+    }
+
+    private func restartEngineIfNeeded() {
+        guard started, !engine.isRunning else { return }
+        #if os(iOS) || os(tvOS) || os(visionOS)
+        try? AVAudioSession.sharedInstance().setActive(true)
+        #endif
         try? engine.start()
     }
 

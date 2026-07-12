@@ -53,6 +53,9 @@ final class RaceGame {
     // MARK: - State observed by the HUD
 
     private(set) var phase: Phase = .ready
+    /// False while AR is still searching for a floor plane; always true on
+    /// platforms without a floor anchor (simulator, macOS).
+    private(set) var isCourseAnchored = true
     var mode: Mode = .timeAttack {
         didSet {
             guard phase == .ready, mode != oldValue else { return }
@@ -249,6 +252,10 @@ final class RaceGame {
 
     /// Advances the game by one frame. Called from the scene's update event.
     func update(deltaTime: TimeInterval) {
+        let anchored = !anchorRoot.components.has(AnchoringComponent.self)
+            || anchorRoot.isAnchored
+        if anchored != isCourseAnchored { isCourseAnchored = anchored }
+
         let dt = Float(min(deltaTime, 1.0 / 20.0))
         switch phase {
         case .ready:

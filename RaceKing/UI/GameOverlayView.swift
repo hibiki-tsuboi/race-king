@@ -28,47 +28,22 @@ struct GameOverlayView: View {
     private var centerMessage: some View {
         switch game.phase {
         case .ready:
-            VStack(spacing: 18) {
-                #if os(iOS) && !targetEnvironment(simulator)
-                Text("端末を動かして床を映すとコースが置かれます\n床に向けてタップでコース移動・長押しドラッグで追従")
-                    .font(.callout.bold())
-                    .multilineTextAlignment(.center)
-                    .foregroundStyle(.white)
-                    .padding(10)
-                    .background(.black.opacity(0.5), in: RoundedRectangle(cornerRadius: 10))
-                #endif
-
-                Picker("モード", selection: $game.mode) {
-                    Text("タイムアタック").tag(RaceGame.Mode.timeAttack)
-                    Text("VS AIレース").tag(RaceGame.Mode.race)
-                }
-                .pickerStyle(.segmented)
-                .frame(maxWidth: 290)
-                .padding(6)
-                .background(.black.opacity(0.4), in: RoundedRectangle(cornerRadius: 12))
-
-                Text("コーナー中にブレーキをタップでドリフト!\n長く滑るほどミニターボ")
-                    .font(.caption.bold())
-                    .multilineTextAlignment(.center)
-                    .foregroundStyle(.white)
-                    .padding(8)
-                    .background(.black.opacity(0.4), in: RoundedRectangle(cornerRadius: 10))
-
-                Button {
-                    game.startRace()
-                } label: {
-                    Text("START")
-                        .font(.system(size: 30, weight: .black, design: .rounded))
+            if !game.isCourseAnchored {
+                // AR is still scanning: no course to race on yet.
+                VStack(spacing: 14) {
+                    ProgressView()
+                        .controlSize(.large)
+                        .tint(.white)
+                    Text("床を探しています…\n端末をゆっくり動かして床を映してください")
+                        .font(.callout.bold())
+                        .multilineTextAlignment(.center)
                         .foregroundStyle(.white)
-                        .padding(.horizontal, 44)
-                        .padding(.vertical, 14)
-                        .background(.red.gradient, in: Capsule())
                 }
-                .buttonStyle(.plain)
+                .padding(22)
+                .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 16))
+            } else {
+                readyMenu
             }
-            // Sit above the circuit so the menu doesn't hide the grid
-            // or the placement reticle at the screen center.
-            .offset(y: -150)
         case .countdown:
             Text("\(game.countdownValue)")
                 .font(.system(size: 130, weight: .black, design: .rounded))
@@ -112,6 +87,50 @@ struct GameOverlayView: View {
             .padding(28)
             .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 22))
         }
+    }
+
+    private var readyMenu: some View {
+        VStack(spacing: 18) {
+                #if os(iOS) && !targetEnvironment(simulator)
+                Text("床に向けてタップでコース移動\n長押しドラッグで追従")
+                    .font(.callout.bold())
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(.white)
+                    .padding(10)
+                    .background(.black.opacity(0.5), in: RoundedRectangle(cornerRadius: 10))
+                #endif
+
+                Picker("モード", selection: $game.mode) {
+                    Text("タイムアタック").tag(RaceGame.Mode.timeAttack)
+                    Text("VS AIレース").tag(RaceGame.Mode.race)
+                }
+                .pickerStyle(.segmented)
+                .frame(maxWidth: 290)
+                .padding(6)
+                .background(.black.opacity(0.4), in: RoundedRectangle(cornerRadius: 12))
+
+                Text("コーナー中にブレーキをタップでドリフト!\n長く滑るほどミニターボ")
+                    .font(.caption.bold())
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(.white)
+                    .padding(8)
+                    .background(.black.opacity(0.4), in: RoundedRectangle(cornerRadius: 10))
+
+                Button {
+                    game.startRace()
+                } label: {
+                    Text("START")
+                        .font(.system(size: 30, weight: .black, design: .rounded))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 44)
+                        .padding(.vertical, 14)
+                        .background(.red.gradient, in: Capsule())
+                }
+                .buttonStyle(.plain)
+        }
+        // Sit above the circuit so the menu doesn't hide the grid
+        // or the placement reticle at the screen center.
+        .offset(y: -150)
     }
 }
 

@@ -5,6 +5,9 @@
 
 import SwiftUI
 import RealityKit
+#if os(iOS)
+import AVFoundation
+#endif
 
 struct ContentView: View {
     @State private var game = RaceGame()
@@ -12,6 +15,8 @@ struct ContentView: View {
     #if os(iOS)
     @State private var haptics = Haptics()
     @State private var tilt = TiltSteering()
+    @State private var cameraAccessDenied = false
+    @Environment(\.scenePhase) private var scenePhase
     #endif
     @State private var updateSubscription: EventSubscription?
 
@@ -58,6 +63,12 @@ struct ContentView: View {
             .ignoresSafeArea()
 
             GameOverlayView(game: game)
+
+            #if os(iOS) && !targetEnvironment(simulator)
+            if cameraAccessDenied {
+                CameraDeniedView()
+            }
+            #endif
         }
         .persistentSystemOverlays(.hidden)
         .task {
@@ -68,8 +79,21 @@ struct ContentView: View {
                 #endif
             }
             updateTiltSteering()
+            refreshCameraAuthorization()
         }
         .onChange(of: game.tiltSteeringEnabled) { updateTiltSteering() }
+        #if os(iOS)
+        .onChange(of: scenePhase) {
+            if scenePhase == .active { refreshCameraAuthorization() }
+        }
+        #endif
+    }
+
+    private func refreshCameraAuthorization() {
+        #if os(iOS) && !targetEnvironment(simulator)
+        let status = AVCaptureDevice.authorizationStatus(for: .video)
+        cameraAccessDenied = status == .denied || status == .restricted
+        #endif
     }
 
     #if os(iOS) && !targetEnvironment(simulator)
@@ -97,6 +121,39 @@ struct ContentView: View {
         #endif
     }
 }
+
+#if os(iOS) && !targetEnvironment(simulator)
+/// Shown when camera access was denied: AR cannot run without it.
+private struct CameraDeniedView: View {
+    var body: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "camera.fill")
+                .font(.largeTitle)
+            Text("カメラへのアクセスが必要です")
+                .font(.headline.weight(.black))
+            Text("ARでレースコースを床に表示するために\nカメラを使用します。設定アプリで許可してください。")
+                .font(.callout)
+                .multilineTextAlignment(.center)
+            Button {
+                if let url = URL(string: UIApplication.openSettingsURLString) {
+                    UIApplication.shared.open(url)
+                }
+            } label: {
+                Text("設定を開く")
+                    .font(.headline.bold())
+                    .padding(.horizontal, 24)
+                    .padding(.vertical, 10)
+                    .background(.red.gradient, in: Capsule())
+            }
+            .buttonStyle(.plain)
+        }
+        .foregroundStyle(.white)
+        .padding(26)
+        .background(.black.opacity(0.8), in: RoundedRectangle(cornerRadius: 20))
+        .padding()
+    }
+}
+#endif
 
 #Preview {
     ContentView()
