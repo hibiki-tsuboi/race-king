@@ -218,6 +218,12 @@ final class RaceGame {
         boostFlame = car.findEntity(named: "boostFlame")
     }
 
+    /// Applies an imported model to one AI kart (nil restores its tinted kart).
+    func setAICarModel(_ template: Entity?, at index: Int) {
+        guard aiDrivers.indices.contains(index) else { return }
+        aiDrivers[index].applyModel(template)
+    }
+
     func startRace() {
         guard phase == .ready else { return }
         countdownRemaining = 3

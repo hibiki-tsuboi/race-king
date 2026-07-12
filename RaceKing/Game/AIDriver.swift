@@ -17,6 +17,8 @@ import AppKit
 final class AIDriver {
     let entity: Entity
     let topSpeed: Float
+    /// Tint of the procedural kart, kept for reverting a custom model.
+    let bodyColor: SimpleMaterial.Color
     private(set) var lapCount = 0
     var finished = false
     /// Accumulated distance along the track, for live ranking.
@@ -26,18 +28,25 @@ final class AIDriver {
     private var nextCheckpoint = 1
     private var trackS: Float = 0
 
-    init(bodyColor: SimpleMaterial.Color, topSpeed: Float) {
-        // AI karts stay procedural so each keeps its own tint even when a
-        // custom PlayerCar.usdz is installed.
-        entity = EntityFactory.makeCar(bodyColor: bodyColor, allowCustomModel: false)
+    init(index: Int, bodyColor: SimpleMaterial.Color, topSpeed: Float) {
+        self.bodyColor = bodyColor
         self.topSpeed = topSpeed
+        entity = Entity()
+        let template = EntityFactory.aiCarTemplates.indices.contains(index)
+            ? EntityFactory.aiCarTemplates[index] : nil
+        EntityFactory.populate(entity, bodyColor: bodyColor, customTemplate: template)
+    }
+
+    /// Swaps this kart's body for an imported model (nil = tinted kart).
+    func applyModel(_ template: Entity?) {
+        EntityFactory.populate(entity, bodyColor: bodyColor, customTemplate: template)
     }
 
     static func defaultOpponents() -> [AIDriver] {
         [
-            AIDriver(bodyColor: .init(red: 0.2, green: 0.4, blue: 0.95, alpha: 1), topSpeed: 0.63),
-            AIDriver(bodyColor: .init(red: 0.15, green: 0.7, blue: 0.3, alpha: 1), topSpeed: 0.60),
-            AIDriver(bodyColor: .init(red: 0.95, green: 0.65, blue: 0.1, alpha: 1), topSpeed: 0.575),
+            AIDriver(index: 0, bodyColor: .init(red: 0.2, green: 0.4, blue: 0.95, alpha: 1), topSpeed: 0.63),
+            AIDriver(index: 1, bodyColor: .init(red: 0.15, green: 0.7, blue: 0.3, alpha: 1), topSpeed: 0.60),
+            AIDriver(index: 2, bodyColor: .init(red: 0.95, green: 0.65, blue: 0.1, alpha: 1), topSpeed: 0.575),
         ]
     }
 

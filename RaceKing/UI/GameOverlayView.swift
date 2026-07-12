@@ -117,8 +117,15 @@ struct GameOverlayView: View {
 
 /// Lap counter, timers, race position, and settings along the top edge.
 struct HUDView: View {
+    /// Which car the next file import applies to.
+    private enum CarImportSlot {
+        case player
+        case ai(Int)
+    }
+
     @Bindable var game: RaceGame
     @State private var showingCarImporter = false
+    @State private var importSlot: CarImportSlot = .player
     @State private var importErrorMessage: String?
 
     var body: some View {
@@ -212,18 +219,29 @@ struct HUDView: View {
                         #if !os(tvOS)
                         Divider()
                         Button {
+                            importSlot = .player
                             showingCarImporter = true
                         } label: {
-                            Label("車の3Dモデルを読み込む…", systemImage: "square.and.arrow.down")
+                            Label("自分の車を読み込む…", systemImage: "square.and.arrow.down")
                         }
-                        if EntityFactory.customCarTemplate != nil {
+                        Menu {
+                            ForEach(0..<3, id: \.self) { index in
+                                Button("AI \(index + 1)…") {
+                                    importSlot = .ai(index)
+                                    showingCarImporter = true
+                                }
+                            }
+                        } label: {
+                            Label("AIの車を読み込む", systemImage: "square.and.arrow.down.on.square")
+                        }
+                        if hasAnyCustomCar {
                             Button {
                                 EntityFactory.customCarFlipped.toggle()
-                                game.setCustomCarModel(EntityFactory.customCarTemplate)
+                                reapplyCustomCars()
                             } label: {
                                 Label("車の前後を反転", systemImage: "arrow.left.arrow.right")
                             }
-                            Button("標準の車に戻す") { revertCarModel() }
+                            Button("すべて標準の車に戻す") { revertCarModels() }
                         }
                         #endif
                     } label: {
@@ -254,30 +272,61 @@ struct HUDView: View {
     }
 
     #if !os(tvOS)
-    /// Copies the picked USDZ into app storage and applies it immediately.
+    private var hasAnyCustomCar: Bool {
+        EntityFactory.customCarTemplate != nil
+            || EntityFactory.aiCarTemplates.contains { $0 != nil }
+    }
+
+    /// Copies the picked USDZ into app storage and applies it to the car
+    /// slot the user chose in the menu.
     private func importCarModel(from url: URL) {
         let accessing = url.startAccessingSecurityScopedResource()
         defer { if accessing { url.stopAccessingSecurityScopedResource() } }
 
-        let destination = EntityFactory.importedCarURL
+        let destination: URL
+        switch importSlot {
+        case .player: destination = EntityFactory.importedCarURL
+        case .ai(let index): destination = EntityFactory.importedAICarURL(index: index)
+        }
         do {
             try? FileManager.default.removeItem(at: destination)
             try FileManager.default.copyItem(at: url, to: destination)
             let template = try Entity.load(contentsOf: destination)
-            EntityFactory.customCarFlipped = false
-            EntityFactory.customCarTemplate = template
-            game.setCustomCarModel(template)
+            switch importSlot {
+            case .player:
+                EntityFactory.customCarFlipped = false
+                EntityFactory.customCarTemplate = template
+                game.setCustomCarModel(template)
+            case .ai(let index):
+                EntityFactory.aiCarTemplates[index] = template
+                game.setAICarModel(template, at: index)
+            }
         } catch {
             try? FileManager.default.removeItem(at: destination)
             importErrorMessage = error.localizedDescription
         }
     }
 
-    private func revertCarModel() {
+    /// Re-populates every custom car, e.g. after toggling the flip setting.
+    private func reapplyCustomCars() {
+        game.setCustomCarModel(EntityFactory.customCarTemplate)
+        for (index, template) in EntityFactory.aiCarTemplates.enumerated() where template != nil {
+            game.setAICarModel(template, at: index)
+        }
+    }
+
+    /// Deletes imported files and restores the bundled default cars.
+    private func revertCarModels() {
         try? FileManager.default.removeItem(at: EntityFactory.importedCarURL)
         let bundled = try? Entity.load(named: "PlayerCar")
         EntityFactory.customCarTemplate = bundled
         game.setCustomCarModel(bundled)
+        for index in EntityFactory.aiCarTemplates.indices {
+            try? FileManager.default.removeItem(at: EntityFactory.importedAICarURL(index: index))
+            let template = EntityFactory.bundledAICarTemplate(index: index)
+            EntityFactory.aiCarTemplates[index] = template
+            game.setAICarModel(template, at: index)
+        }
     }
     #endif
 }

@@ -87,21 +87,43 @@ enum EntityFactory {
     static let playerBodyColor = SimpleMaterial.Color(red: 0.9, green: 0.12, blue: 0.15, alpha: 1)
     static let ghostBodyColor = SimpleMaterial.Color(white: 0.9, alpha: 1)
 
-    /// Where a car model imported from the Files app is kept across launches.
-    static var importedCarURL: URL {
+    private static var supportDirectory: URL {
         let directory = URL.applicationSupportDirectory
             .appending(path: "RaceKing", directoryHint: .isDirectory)
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        return directory.appending(path: "PlayerCar.usdz")
+        return directory
     }
 
-    /// Custom model for the player and ghost cars (AI karts keep the
-    /// tintable procedural body). An imported file wins over a bundled
-    /// `PlayerCar.usdz`; nil falls back to the procedural kart.
+    /// Where a car model imported from the Files app is kept across launches.
+    static var importedCarURL: URL {
+        supportDirectory.appending(path: "PlayerCar.usdz")
+    }
+
+    /// Imported model for one of the three AI karts (slots 0-2).
+    static func importedAICarURL(index: Int) -> URL {
+        supportDirectory.appending(path: "AICar\(index + 1).usdz")
+    }
+
+    /// Custom model for the player and ghost cars. An imported file wins
+    /// over a bundled `PlayerCar.usdz`; nil falls back to the procedural kart.
     static var customCarTemplate: Entity? = {
         if let imported = try? Entity.load(contentsOf: importedCarURL) { return imported }
         return try? Entity.load(named: "PlayerCar")
     }()
+
+    /// A bundled default model for one AI kart (`AICar1-3.usdz`).
+    static func bundledAICarTemplate(index: Int) -> Entity? {
+        try? Entity.load(named: "AICar\(index + 1)")
+    }
+
+    /// Models for the AI karts: an imported file wins over the bundled
+    /// default; nil slots fall back to the tinted procedural kart.
+    static var aiCarTemplates: [Entity?] = (0..<3).map { index in
+        if let imported = try? Entity.load(contentsOf: importedAICarURL(index: index)) {
+            return imported
+        }
+        return bundledAICarTemplate(index: index)
+    }
 
     /// User override for when nose auto-detection guesses wrong; persisted.
     static var customCarFlipped: Bool {
