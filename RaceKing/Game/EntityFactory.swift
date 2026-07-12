@@ -345,8 +345,10 @@ enum EntityFactory {
     /// (macOS, simulator), where the real floor is not visible.
     static func makeFallbackGround() -> Entity {
         let grass = SimpleMaterial(color: .init(red: 0.2, green: 0.45, blue: 0.2, alpha: 1), roughness: 1, isMetallic: false)
+        // Large enough that the camera never sees past its horizon,
+        // even on tall iPad aspect ratios.
         return ModelEntity(
-            mesh: .generatePlane(width: 12, depth: 12),
+            mesh: .generatePlane(width: 60, depth: 60),
             materials: [grass]
         )
     }
