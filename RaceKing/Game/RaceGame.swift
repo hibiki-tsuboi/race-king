@@ -96,8 +96,12 @@ final class RaceGame {
     // MARK: - Scene
 
     let layout = TrackLayout()
-    /// Root of the game scene. On AR devices this gets anchored to the floor.
+    /// Receives the AR floor anchor; the course moves freely inside it.
+    let anchorRoot = Entity()
+    /// Root of the course and cars, repositionable on the floor by the player.
     let root = Entity()
+    /// Follows the AR camera so course placement can use the aim direction.
+    let cameraRig = Entity()
     private let car: Entity
     private let ghostCar: Entity
     private let checkpoints: [SIMD3<Float>]
@@ -153,6 +157,7 @@ final class RaceGame {
         ghostEnabled = UserDefaults.standard.object(forKey: "ghostEnabled") as? Bool ?? true
         tiltSteeringEnabled = UserDefaults.standard.bool(forKey: "tiltSteering")
 
+        anchorRoot.addChild(root)
         root.addChild(EntityFactory.makeTrack(layout: layout))
         root.addChild(car)
         root.addChild(ghostCar)
@@ -170,30 +175,37 @@ final class RaceGame {
         .plane(.horizontal, classification: .floor, minimumBounds: [0.6, 0.6])
     }
 
-    /// Anchors the course to the floor (called once from AR setup).
+    /// Anchors the scene to the floor (called once from AR setup).
     func installFloorAnchor() {
-        root.components.set(AnchoringComponent(Self.floorAnchorTarget))
+        anchorRoot.components.set(AnchoringComponent(Self.floorAnchorTarget))
     }
 
-    /// Detaches the course and re-anchors it to the floor plane currently
-    /// in view — point the camera where the course should go first.
-    func reanchorCourse() {
-        guard phase == .ready, root.components.has(AnchoringComponent.self) else { return }
-        root.isEnabled = false
-        root.components.remove(AnchoringComponent.self)
-        Task { @MainActor in
-            // Give the anchoring system a beat to release the old plane.
-            try? await Task.sleep(for: .milliseconds(80))
-            root.components.set(AnchoringComponent(Self.floorAnchorTarget))
-            root.isEnabled = true
-        }
+    /// Moves the course center to a floor point (in `anchorRoot` space),
+    /// clamped so it can't be flung out of reach.
+    func moveCourse(to point: SIMD3<Float>) {
+        guard phase == .ready else { return }
+        root.position = [
+            max(-2, min(2, point.x)), 0, max(-2, min(2, point.z)),
+        ]
     }
 
-    /// Spins the whole course a quarter turn on the floor, for rooms where
-    /// the long side doesn't match the anchor's orientation.
+    /// Moves the course to where a world-space ray — the camera's aim —
+    /// meets the floor. Ignored unless the ray points down at it.
+    func moveCourse(alongRayFrom origin: SIMD3<Float>, direction: SIMD3<Float>) {
+        guard phase == .ready else { return }
+        let localOrigin = anchorRoot.convert(position: origin, from: nil)
+        let localDirection = anchorRoot.convert(direction: direction, from: nil)
+        guard localDirection.y < -0.05 else { return }
+        let distance = -localOrigin.y / localDirection.y
+        guard distance > 0, distance < 15 else { return }
+        moveCourse(to: localOrigin + localDirection * distance)
+    }
+
+    /// Spins the whole course 45° on the floor, for rooms where the long
+    /// side doesn't match the anchor's orientation.
     func rotateCourse() {
         guard phase == .ready else { return }
-        root.orientation = simd_quatf(angle: .pi / 2, axis: [0, 1, 0]) * root.orientation
+        root.orientation = simd_quatf(angle: .pi / 4, axis: [0, 1, 0]) * root.orientation
     }
 
     /// Applies an imported car model to the player and ghost cars in place

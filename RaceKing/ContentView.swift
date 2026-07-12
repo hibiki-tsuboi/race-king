@@ -22,6 +22,9 @@ struct ContentView: View {
                 // AR: show the real room and anchor the circuit to the floor.
                 content.camera = .spatialTracking
                 game.installFloorAnchor()
+                // Camera pose feed for aim-based course placement.
+                game.cameraRig.components.set(AnchoringComponent(.camera))
+                content.add(game.cameraRig)
                 #elseif os(macOS) || os(iOS) || os(tvOS)
                 // No AR passthrough here: fake a floor and look down at the circuit.
                 content.add(EntityFactory.makeFallbackGround())
@@ -30,7 +33,7 @@ struct ContentView: View {
                 content.add(camera)
                 #endif
 
-                content.add(game.root)
+                content.add(game.anchorRoot)
                 updateSubscription = content.subscribe(to: SceneEvents.Update.self) { event in
                     game.update(deltaTime: event.deltaTime)
                     audio.setEngine(
@@ -42,6 +45,15 @@ struct ContentView: View {
             }
             #if os(macOS) || (os(iOS) && targetEnvironment(simulator))
             .realityViewCameraControls(.orbit)
+            #endif
+            #if os(iOS) && !targetEnvironment(simulator)
+            // AR: tap moves the course to the aimed floor point; holding a
+            // drag carries it along the aim continuously.
+            .onTapGesture { moveCourseTowardAim() }
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 15)
+                    .onChanged { _ in moveCourseTowardAim() }
+            )
             #endif
             .ignoresSafeArea()
 
@@ -59,6 +71,20 @@ struct ContentView: View {
         }
         .onChange(of: game.tiltSteeringEnabled) { updateTiltSteering() }
     }
+
+    #if os(iOS) && !targetEnvironment(simulator)
+    /// Casts the camera's aim onto the floor and moves the course there.
+    private func moveCourseTowardAim() {
+        let transform = game.cameraRig.transformMatrix(relativeTo: nil)
+        let origin = SIMD3<Float>(
+            transform.columns.3.x, transform.columns.3.y, transform.columns.3.z
+        )
+        let forward = -SIMD3<Float>(
+            transform.columns.2.x, transform.columns.2.y, transform.columns.2.z
+        )
+        game.moveCourse(alongRayFrom: origin, direction: forward)
+    }
+    #endif
 
     private func updateTiltSteering() {
         #if os(iOS)

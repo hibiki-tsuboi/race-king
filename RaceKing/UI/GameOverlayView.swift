@@ -30,7 +30,7 @@ struct GameOverlayView: View {
         case .ready:
             VStack(spacing: 18) {
                 #if os(iOS) && !targetEnvironment(simulator)
-                Text("端末を動かして床を映すと\nコースが置かれます")
+                Text("端末を動かして床を映すとコースが置かれます\n床に向けてタップでコース移動・長押しドラッグで追従")
                     .font(.callout.bold())
                     .multilineTextAlignment(.center)
                     .foregroundStyle(.white)
@@ -65,29 +65,9 @@ struct GameOverlayView: View {
                         .background(.red.gradient, in: Capsule())
                 }
                 .buttonStyle(.plain)
-
-                #if os(iOS) && !targetEnvironment(simulator)
-                HStack(spacing: 12) {
-                    Button {
-                        game.reanchorCourse()
-                    } label: {
-                        Label("コースを置き直す", systemImage: "arrow.triangle.2.circlepath")
-                    }
-                    Button {
-                        game.rotateCourse()
-                    } label: {
-                        Label("90°回転", systemImage: "rotate.right")
-                    }
-                }
-                .font(.footnote.bold())
-                .foregroundStyle(.white)
-                .buttonStyle(.plain)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .background(.black.opacity(0.45), in: Capsule())
-                #endif
             }
-            // Sit above the circuit so the menu doesn't hide the grid.
+            // Sit above the circuit so the menu doesn't hide the grid
+            // or the placement reticle at the screen center.
             .offset(y: -150)
         case .countdown:
             Text("\(game.countdownValue)")
@@ -210,6 +190,20 @@ struct HUDView: View {
                         }
                         .buttonStyle(.plain)
                     }
+                    #if os(iOS) && !targetEnvironment(simulator)
+                    if game.phase == .ready {
+                        // Spins the course a quarter turn on the floor.
+                        Button {
+                            game.rotateCourse()
+                        } label: {
+                            Image(systemName: "rotate.right")
+                                .font(.title3.bold())
+                                .padding(10)
+                                .background(.black.opacity(0.45), in: Circle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    #endif
                     Menu {
                         #if os(iOS)
                         Toggle("傾きで操作", isOn: $game.tiltSteeringEnabled)
