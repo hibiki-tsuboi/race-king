@@ -91,7 +91,7 @@ struct GameOverlayView: View {
 
     private var readyMenu: some View {
         VStack(spacing: 18) {
-                #if os(iOS) && !targetEnvironment(simulator)
+                #if !targetEnvironment(simulator)
                 Text("床に向けてタップでコース移動\n長押しドラッグで追従")
                     .font(.callout.bold())
                     .multilineTextAlignment(.center)
@@ -149,7 +149,6 @@ struct HUDView: View {
 
     var body: some View {
         hudContent
-        #if !os(tvOS)
             .fileImporter(
                 isPresented: $showingCarImporter,
                 allowedContentTypes: [.usdz]
@@ -169,7 +168,6 @@ struct HUDView: View {
             } message: {
                 Text(importErrorMessage ?? "")
             }
-        #endif
     }
 
     private var hudContent: some View {
@@ -216,7 +214,7 @@ struct HUDView: View {
                         }
                         .buttonStyle(.plain)
                     }
-                    #if os(iOS) && !targetEnvironment(simulator)
+                    #if !targetEnvironment(simulator)
                     if game.phase == .ready {
                         // Spins the course a quarter turn on the floor.
                         Button {
@@ -231,11 +229,8 @@ struct HUDView: View {
                     }
                     #endif
                     Menu {
-                        #if os(iOS)
                         Toggle("傾きで操作", isOn: $game.tiltSteeringEnabled)
-                        #endif
                         Toggle("ゴースト表示", isOn: $game.ghostEnabled)
-                        #if !os(tvOS)
                         Divider()
                         Button {
                             importSlot = .player
@@ -262,7 +257,6 @@ struct HUDView: View {
                             }
                             Button("すべて標準の車に戻す") { revertCarModels() }
                         }
-                        #endif
                     } label: {
                         Image(systemName: "gearshape.fill")
                             .font(.title3.bold())
@@ -290,7 +284,6 @@ struct HUDView: View {
         }
     }
 
-    #if !os(tvOS)
     private var hasAnyCustomCar: Bool {
         EntityFactory.customCarTemplate != nil
             || EntityFactory.aiCarTemplates.contains { $0 != nil }
@@ -347,7 +340,6 @@ struct HUDView: View {
             game.setAICarModel(template, at: index)
         }
     }
-    #endif
 }
 
 func lapTimeString(_ time: TimeInterval) -> String {

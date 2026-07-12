@@ -5,37 +5,33 @@
 
 import SwiftUI
 import RealityKit
-#if os(iOS)
 import AVFoundation
-#endif
 
 struct ContentView: View {
     @State private var game = RaceGame()
     @State private var audio = GameAudio()
-    #if os(iOS)
     @State private var haptics = Haptics()
     @State private var tilt = TiltSteering()
     @State private var cameraAccessDenied = false
-    @Environment(\.scenePhase) private var scenePhase
-    #endif
     @State private var updateSubscription: EventSubscription?
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         ZStack {
             RealityView { content in
-                #if os(iOS) && !targetEnvironment(simulator)
+                #if targetEnvironment(simulator)
+                // No AR passthrough here: fake a floor and look down at the circuit.
+                content.add(EntityFactory.makeFallbackGround())
+                let camera = Entity(components: PerspectiveCameraComponent())
+                camera.look(at: .zero, from: [0, 1.9, 2.4], relativeTo: nil)
+                content.add(camera)
+                #else
                 // AR: show the real room and anchor the circuit to the floor.
                 content.camera = .spatialTracking
                 game.installFloorAnchor()
                 // Camera pose feed for aim-based course placement.
                 game.cameraRig.components.set(AnchoringComponent(.camera))
                 content.add(game.cameraRig)
-                #elseif os(macOS) || os(iOS) || os(tvOS)
-                // No AR passthrough here: fake a floor and look down at the circuit.
-                content.add(EntityFactory.makeFallbackGround())
-                let camera = Entity(components: PerspectiveCameraComponent())
-                camera.look(at: .zero, from: [0, 1.9, 2.4], relativeTo: nil)
-                content.add(camera)
                 #endif
 
                 content.add(game.anchorRoot)
@@ -48,10 +44,9 @@ struct ContentView: View {
                     )
                 }
             }
-            #if os(macOS) || (os(iOS) && targetEnvironment(simulator))
+            #if targetEnvironment(simulator)
             .realityViewCameraControls(.orbit)
-            #endif
-            #if os(iOS) && !targetEnvironment(simulator)
+            #else
             // AR: tap moves the course to the aimed floor point; holding a
             // drag carries it along the aim continuously.
             .onTapGesture { moveCourseTowardAim() }
@@ -64,39 +59,33 @@ struct ContentView: View {
 
             GameOverlayView(game: game)
 
-            #if os(iOS) && !targetEnvironment(simulator)
             if cameraAccessDenied {
                 CameraDeniedView()
             }
-            #endif
         }
         .persistentSystemOverlays(.hidden)
         .task {
             game.onEvent = { event in
                 audio.handle(event)
-                #if os(iOS)
                 haptics.handle(event)
-                #endif
             }
             updateTiltSteering()
             refreshCameraAuthorization()
         }
         .onChange(of: game.tiltSteeringEnabled) { updateTiltSteering() }
-        #if os(iOS)
         .onChange(of: scenePhase) {
             if scenePhase == .active { refreshCameraAuthorization() }
         }
-        #endif
     }
 
     private func refreshCameraAuthorization() {
-        #if os(iOS) && !targetEnvironment(simulator)
+        #if !targetEnvironment(simulator)
         let status = AVCaptureDevice.authorizationStatus(for: .video)
         cameraAccessDenied = status == .denied || status == .restricted
         #endif
     }
 
-    #if os(iOS) && !targetEnvironment(simulator)
+    #if !targetEnvironment(simulator)
     /// Casts the camera's aim onto the floor and moves the course there.
     private func moveCourseTowardAim() {
         let transform = game.cameraRig.transformMatrix(relativeTo: nil)
@@ -111,18 +100,15 @@ struct ContentView: View {
     #endif
 
     private func updateTiltSteering() {
-        #if os(iOS)
         if game.tiltSteeringEnabled {
             tilt.start { game.steeringInput = $0 }
         } else {
             tilt.stop()
             game.steeringInput = 0
         }
-        #endif
     }
 }
 
-#if os(iOS) && !targetEnvironment(simulator)
 /// Shown when camera access was denied: AR cannot run without it.
 private struct CameraDeniedView: View {
     var body: some View {
@@ -153,7 +139,6 @@ private struct CameraDeniedView: View {
         .padding()
     }
 }
-#endif
 
 #Preview {
     ContentView()

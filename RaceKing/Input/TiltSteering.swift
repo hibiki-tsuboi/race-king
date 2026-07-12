@@ -3,7 +3,6 @@
 //  RaceKing
 //
 
-#if os(iOS)
 import CoreMotion
 
 /// Steers with the phone's lateral tilt, like a steering wheel. Uses the
@@ -34,4 +33,3 @@ final class TiltSteering {
         motion.stopDeviceMotionUpdates()
     }
 }
-#endif

@@ -61,12 +61,10 @@ struct HoldButton: View {
             .overlay(Circle().strokeBorder(.white.opacity(0.55), lineWidth: 1.5))
             .scaleEffect(isPressed ? 0.92 : 1)
             .animation(.easeOut(duration: 0.08), value: isPressed)
-        #if !os(tvOS)
             .gesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { _ in isPressed = true }
                     .onEnded { _ in isPressed = false }
             )
-        #endif
     }
 }

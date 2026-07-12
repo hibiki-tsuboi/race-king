@@ -3,7 +3,6 @@
 //  RaceKing
 //
 
-#if os(iOS)
 import UIKit
 
 /// Maps game events to haptic feedback.
@@ -43,4 +42,3 @@ final class Haptics {
         }
     }
 }
-#endif

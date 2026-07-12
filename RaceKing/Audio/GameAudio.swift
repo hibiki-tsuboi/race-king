@@ -5,9 +5,7 @@
 
 import AVFoundation
 import os
-#if canImport(UIKit) && !os(watchOS)
 import UIKit
-#endif
 
 /// Procedural game audio: an engine tone that follows the car's speed plus
 /// short beeps for countdown, laps, and results. No sound assets required.
@@ -43,11 +41,9 @@ final class GameAudio {
     func start() {
         guard !started else { return }
         started = true
-        #if os(iOS) || os(tvOS) || os(visionOS)
         // Ambient: respects the silent switch and mixes with the user's music.
         try? AVAudioSession.sharedInstance().setCategory(.ambient)
         try? AVAudioSession.sharedInstance().setActive(true)
-        #endif
 
         let outputSampleRate = engine.outputNode.outputFormat(forBus: 0).sampleRate
         sampleRate = Float(outputSampleRate)
@@ -120,7 +116,6 @@ final class GameAudio {
         ) { [weak self] _ in
             MainActor.assumeIsolated { self?.restartEngineIfNeeded() }
         }
-        #if os(iOS) || os(tvOS) || os(visionOS)
         center.addObserver(
             forName: AVAudioSession.interruptionNotification, object: nil, queue: .main
         ) { [weak self] notification in
@@ -128,21 +123,16 @@ final class GameAudio {
             guard rawType.flatMap(AVAudioSession.InterruptionType.init) == .ended else { return }
             MainActor.assumeIsolated { self?.restartEngineIfNeeded() }
         }
-        #endif
-        #if canImport(UIKit) && !os(watchOS)
         center.addObserver(
             forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main
         ) { [weak self] _ in
             MainActor.assumeIsolated { self?.restartEngineIfNeeded() }
         }
-        #endif
     }
 
     private func restartEngineIfNeeded() {
         guard started, !engine.isRunning else { return }
-        #if os(iOS) || os(tvOS) || os(visionOS)
         try? AVAudioSession.sharedInstance().setActive(true)
-        #endif
         try? engine.start()
     }
 
