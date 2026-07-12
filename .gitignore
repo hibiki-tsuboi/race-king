@@ -1,0 +1,21 @@
+# macOS
+.DS_Store
+
+# Xcode ユーザー個別設定(ブレークポイント・ウィンドウ状態など)
+xcuserdata/
+*.xcuserstate
+
+# ビルド成果物
+build/
+DerivedData/
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Swift Package Manager
+.build/
+.swiftpm/
+
+# アーカイブ・プロファイル
+*.xcarchive
+*.mobileprovision
