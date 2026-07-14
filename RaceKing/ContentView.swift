@@ -22,6 +22,7 @@ struct ContentView: View {
     @State private var isConfiguringSpatialTracking = false
     @State private var roomScanError: String?
     @State private var courseScaleAtPinchStart: Float?
+    @State private var courseRotationAtGestureStart: Float?
     @State private var realityViewSize = CGSize.zero
     @State private var updateSubscription: EventSubscription?
     @Environment(\.scenePhase) private var scenePhase
@@ -73,10 +74,15 @@ struct ContentView: View {
             .simultaneousGesture(
                 DragGesture(minimumDistance: 15)
                     .onChanged { value in
-                        if game.mode != .roomDrive { placeCourse(at: value.location) }
+                        if game.mode != .roomDrive,
+                           courseScaleAtPinchStart == nil,
+                           courseRotationAtGestureStart == nil {
+                            placeCourse(at: value.location)
+                        }
                     }
             )
             .simultaneousGesture(courseScaleGesture)
+            .simultaneousGesture(courseRotationGesture)
             #endif
             .onGeometryChange(for: CGSize.self, of: { $0.size }) {
                 realityViewSize = $0
@@ -240,6 +246,29 @@ struct ContentView: View {
             }
             .onEnded { _ in
                 courseScaleAtPinchStart = nil
+            }
+    }
+
+    private var courseRotationGesture: some Gesture {
+        RotateGesture(minimumAngleDelta: .degrees(0.5))
+            .onChanged { value in
+                guard game.phase == .ready, game.mode != .roomDrive,
+                      !game.virtualModeActive else {
+                    courseRotationAtGestureStart = nil
+                    return
+                }
+                if courseRotationAtGestureStart == nil {
+                    courseRotationAtGestureStart = game.courseRotation
+                }
+                guard let initialRotation = courseRotationAtGestureStart else { return }
+                // SwiftUI angles follow screen coordinates; RealityKit's
+                // positive Y rotation runs the opposite way when viewed above.
+                game.setCourseRotation(
+                    initialRotation - Float(value.rotation.radians)
+                )
+            }
+            .onEnded { _ in
+                courseRotationAtGestureStart = nil
             }
     }
 

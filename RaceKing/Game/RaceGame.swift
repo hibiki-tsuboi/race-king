@@ -85,6 +85,8 @@ final class RaceGame {
     private(set) var roomObstacleCount = 0
     /// Uniform scale of the circuit root, including every kart and effect.
     private(set) var courseScale: Float = 1
+    /// Y-axis rotation shared by gestures and the 45-degree rotate button.
+    private(set) var courseRotation: Float = 0
 
     var canStart: Bool { mode != .roomDrive || roomStartPlaced }
 
@@ -141,6 +143,7 @@ final class RaceGame {
         anchorRoot.transform = .identity
         root.transform = .identity
         root.scale = SIMD3(repeating: courseScale)
+        root.orientation = simd_quatf(angle: courseRotation, axis: [0, 1, 0])
         anchorRoot.addChild(EntityFactory.makeFallbackGround())
         virtualCamera.components.set(PerspectiveCameraComponent())
         virtualCamera.look(at: .zero, from: [0, 1.9, 2.4], relativeTo: nil)
@@ -249,8 +252,15 @@ final class RaceGame {
     /// Spins the whole course 45° on the floor, for rooms where the long
     /// side doesn't match the anchor's orientation.
     func rotateCourse() {
+        setCourseRotation(courseRotation + .pi / 4)
+    }
+
+    /// Rotates the circuit and every child around its center without changing
+    /// the real-world surface where it was placed.
+    func setCourseRotation(_ angle: Float) {
         guard phase == .ready, mode != .roomDrive else { return }
-        root.orientation = simd_quatf(angle: .pi / 4, axis: [0, 1, 0]) * root.orientation
+        courseRotation = atan2(sin(angle), cos(angle))
+        root.orientation = simd_quatf(angle: courseRotation, axis: [0, 1, 0])
     }
 
     /// Resizes the whole circuit in local space, keeping gameplay proportions

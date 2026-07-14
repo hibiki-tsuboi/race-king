@@ -181,7 +181,7 @@ struct GameOverlayView: View {
                 ? "床に向けてタップでスタート位置を決定"
                 : "まず部屋をスキャンしてください"
         }
-        return "床やテーブルをタップしてコース移動\nドラッグで追従・二本指ピンチでサイズ調整"
+        return "床やテーブルをタップしてコース移動\nドラッグで移動・二本指でサイズ／向き調整"
     }
 
     private var courseScaleControls: some View {
