@@ -27,6 +27,7 @@ final class AIDriver {
     private var physics = CarPhysics()
     private var nextCheckpoint = 1
     private var trackS: Float = 0
+    private var touchingWall = false
 
     init(index: Int, bodyColor: SimpleMaterial.Color, topSpeed: Float) {
         self.bodyColor = bodyColor
@@ -63,6 +64,7 @@ final class AIDriver {
         finished = false
         progress = 0
         trackS = layout.nearestS(to: entity.position, near: s)
+        touchingWall = false
     }
 
     func drive(dt: Float, layout: TrackLayout) {
@@ -79,10 +81,11 @@ final class AIDriver {
         let steering = max(-1, min(1, 4 * cross / max(0.001, simd_length(to))))
 
         let offRoad = layout.distanceFromCenterline(p) > layout.roadWidth / 2 + 0.015
-        entity.position += physics.step(
+        let movement = physics.step(
             dt: dt, steeringInput: steering, throttle: true, brake: false,
             offRoad: offRoad, topSpeed: topSpeed
         )
+        entity.position += movement
         entity.orientation = simd_quatf(angle: physics.heading, axis: [0, 1, 0])
 
         // The walls stop AI karts too (e.g. when shoved by another kart).
@@ -91,7 +94,12 @@ final class AIDriver {
         if abs(offset) > limit {
             let normal = layout.lateralNormal(at: entity.position)
             entity.position += normal * (max(-limit, min(limit, offset)) - offset)
-            _ = physics.hitWall(normal: normal)
+            if !touchingWall {
+                _ = physics.hitWall(normal: normal, travel: movement)
+            }
+            touchingWall = true
+        } else {
+            touchingWall = false
         }
     }
 

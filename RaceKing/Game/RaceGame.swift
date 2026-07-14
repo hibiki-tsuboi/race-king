@@ -168,6 +168,7 @@ final class RaceGame {
     private var aiFinishedCount = 0
     private var offRoadPulse: TimeInterval = 0
     private var wallHitCooldown: TimeInterval = 0
+    private var playerTouchingWall = false
 
     // MARK: - Drift bookkeeping
 
@@ -377,12 +378,14 @@ final class RaceGame {
         case .finished:
             // Let the field keep rolling past the flag; brake only to a stop,
             // not into reverse.
-            car.position += physics.step(
+            let movement = physics.step(
                 dt: dt, steeringInput: 0, throttle: false,
                 brake: physics.speed > 0.01, offRoad: false
             )
+            car.position += movement
+            let wallNormal = constrainPlayerToWalls()
+            _ = resolvePlayerWallContact(normal: wallNormal, travel: movement)
             car.orientation = simd_quatf(angle: physics.heading, axis: [0, 1, 0])
-            collidePlayerWithWalls()
             updateDriftEffects(deltaTime)
             stepAI(dt)
             separateCars()
@@ -395,23 +398,25 @@ final class RaceGame {
         updateDrift(deltaTime)
         var offRoad = false
         var impact: Float = 0
+        var wallNormal: SIMD3<Float>?
+        var travel = SIMD3<Float>.zero
         let baseHeight: Float
 
         if mode == .roomDrive, let environment = roomEnvironment {
             baseHeight = environment.floorHeight
             var previous = car.position
             previous.y = baseHeight
-            let movement = physics.step(
+            travel = physics.step(
                 dt: dt, steeringInput: steeringInput,
                 throttle: throttleInput,
                 brake: brakeInput && !physics.isDrifting,
                 offRoad: false
             )
-            var proposed = previous + movement
+            var proposed = previous + travel
             proposed.y = baseHeight
             if let collision = environment.collision(from: previous, to: proposed) {
                 car.position = collision.position
-                impact = collidePlayerWithRoom(normal: collision.normal)
+                wallNormal = collision.normal
             } else {
                 car.position = proposed
             }
@@ -419,14 +424,16 @@ final class RaceGame {
             baseHeight = 0
             offRoad = layout.distanceFromCenterline(car.position)
                 > layout.roadWidth / 2 + 0.015
-            car.position += physics.step(
+            travel = physics.step(
                 dt: dt, steeringInput: steeringInput,
                 throttle: throttleInput,
                 brake: brakeInput && !physics.isDrifting,
                 offRoad: offRoad
             )
-            impact = collidePlayerWithWalls()
+            car.position += travel
+            wallNormal = constrainPlayerToWalls()
         }
+        impact = resolvePlayerWallContact(normal: wallNormal, travel: travel)
 
         // A small hop when the drift kicks in.
         driftHopRemaining = max(0, driftHopRemaining - deltaTime)
@@ -574,30 +581,29 @@ final class RaceGame {
         boostFlame?.isEnabled = false
     }
 
-    /// Keeps the player between the barrier walls, scrubs speed, and nudges
-    /// forward-facing cars along the guardrail. Returns impact strength 0...1.
-    @discardableResult
-    private func collidePlayerWithWalls() -> Float {
+    /// Keeps the player between the barrier walls while retaining movement
+    /// along them. The collision response is applied separately on contact.
+    private func constrainPlayerToWalls() -> SIMD3<Float>? {
         let offset = layout.signedOffset(car.position)
         let limit = layout.corridorLimit
-        guard abs(offset) > limit else { return 0 }
+        guard abs(offset) > limit else { return nil }
         let normal = layout.lateralNormal(at: car.position)
         car.position += normal * (max(-limit, min(limit, offset)) - offset)
-        let impact = physics.hitWall(normal: normal)
-        let trackTangent = SIMD3<Float>(normal.z, 0, -normal.x)
-        physics.assistAlongGuardrail(trackTangent: trackTangent, impact: impact)
-        car.orientation = simd_quatf(angle: physics.heading, axis: [0, 1, 0])
-        return impact
+        return normal
     }
 
-    /// Furniture and floor edges have no fixed race direction, so the assist
-    /// chooses the barrier tangent closest to the car's current heading.
-    private func collidePlayerWithRoom(normal: SIMD3<Float>) -> Float {
-        let impact = physics.hitWall(normal: normal)
-        var tangent = SIMD3<Float>(normal.z, 0, -normal.x)
-        if simd_dot(physics.forward, tangent) < 0 { tangent = -tangent }
-        physics.assistAlongGuardrail(trackTangent: tangent, impact: impact)
-        return impact
+    /// Applies one impulse when contact begins. Sustained glancing contact is
+    /// constrained geometrically instead of draining speed every frame.
+    private func resolvePlayerWallContact(
+        normal: SIMD3<Float>?, travel: SIMD3<Float>
+    ) -> Float {
+        guard let normal else {
+            playerTouchingWall = false
+            return 0
+        }
+        guard !playerTouchingWall else { return 0 }
+        playerTouchingWall = true
+        return physics.hitWall(normal: normal, travel: travel)
     }
 
     /// Gently pushes overlapping karts apart (there is no hard collision).
@@ -697,6 +703,7 @@ final class RaceGame {
     private func placeCarsOnGrid() {
         for driver in aiDrivers { driver.entity.removeFromParent() }
         nextCheckpoint = 1
+        playerTouchingWall = false
 
         switch mode {
         case .timeAttack:

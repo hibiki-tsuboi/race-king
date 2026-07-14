@@ -142,32 +142,29 @@ struct CarPhysics {
         return SIMD3(sin(travelHeading), 0, cos(travelHeading)) * speed * dt
     }
 
-    /// Scrubs off speed when hitting a wall: a glancing touch barely slows
-    /// the car, a head-on hit nearly stops it. Returns impact 0...1.
-    mutating func hitWall(normal: SIMD3<Float>) -> Float {
-        let impact = abs(simd_dot(forward, normal))
-        speed *= max(0, 1 - 0.9 * impact)
+    /// Resolves the initial impact without steering the car on the player's
+    /// behalf. Glancing contacts retain momentum; near head-on hits stop and
+    /// produce only a small rebound. Returns impact strength 0...1.
+    mutating func hitWall(
+        normal: SIMD3<Float>, travel: SIMD3<Float>
+    ) -> Float {
+        let travelLength = simd_length(travel)
+        let normalLength = simd_length(normal)
+        guard travelLength > 1e-6, normalLength > 1e-6 else { return 0 }
+
+        let direction = travel / travelLength
+        let wallNormal = normal / normalLength
+        let impact = min(1, abs(simd_dot(direction, wallNormal)))
+        let stopImpact: Float = 0.85
+
+        if impact < stopImpact {
+            let ratio = impact / stopImpact
+            speed *= 1 - ratio * ratio
+        } else {
+            let rebound = (impact - stopImpact) / (1 - stopImpact)
+            speed *= -0.08 * rebound
+        }
+        slip *= max(0, 1 - impact)
         return impact
-    }
-
-    /// Nudges a forward-moving car toward the course direction after it hits
-    /// a guardrail. Glancing contacts get a subtle correction, while a
-    /// head-on impact turns the car far enough to prevent repeated collisions.
-    mutating func assistAlongGuardrail(
-        trackTangent: SIMD3<Float>, impact: Float
-    ) {
-        guard speed > 0, impact > 0.05 else { return }
-
-        let targetHeading = atan2(trackTangent.x, trackTangent.z)
-        let angleDelta = atan2(
-            sin(targetHeading - heading),
-            cos(targetHeading - heading)
-        )
-        // Do not interfere when the player is deliberately facing backward.
-        guard abs(angleDelta) < .pi * 0.6 else { return }
-
-        let correction = min(0.85, 0.15 + 0.7 * impact)
-        heading += angleDelta * correction
-        slip *= 1 - correction
     }
 }

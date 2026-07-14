@@ -91,7 +91,8 @@ struct RoomDriveEnvironment {
         return point
     }
 
-    /// Stops a proposed movement at the first floor edge or furniture box.
+    /// Blocks movement into a floor edge or furniture box while preserving
+    /// the component parallel to the barrier so glancing contacts can slide.
     func collision(
         from previous: SIMD3<Float>, to proposed: SIMD3<Float>, clearance: Float = 0.035
     ) -> Collision? {
@@ -102,9 +103,13 @@ struct RoomDriveEnvironment {
             let outward = inside ? closestEdge - point : point - closestEdge
             let fallback = SIMD2(proposed.x - previous.x, proposed.z - previous.z)
             let normal2D = Self.normalized(outward, fallback: fallback)
+            let normal = SIMD3<Float>(normal2D.x, 0, normal2D.y)
             return Collision(
-                position: [previous.x, floorHeight, previous.z],
-                normal: [normal2D.x, 0, normal2D.y]
+                position: slidePosition(
+                    from: previous, to: proposed, normal: normal,
+                    clearance: clearance
+                ),
+                normal: normal
             )
         }
 
@@ -113,11 +118,25 @@ struct RoomDriveEnvironment {
                 continue
             }
             return Collision(
-                position: [previous.x, floorHeight, previous.z],
+                position: slidePosition(
+                    from: previous, to: proposed, normal: normal,
+                    clearance: clearance
+                ),
                 normal: normal
             )
         }
         return nil
+    }
+
+    private func slidePosition(
+        from previous: SIMD3<Float>, to proposed: SIMD3<Float>,
+        normal: SIMD3<Float>, clearance: Float
+    ) -> SIMD3<Float> {
+        let movement = proposed - previous
+        let slide = movement - normal * simd_dot(movement, normal)
+        var candidate = previous + slide
+        candidate.y = floorHeight
+        return isDriveable(candidate, clearance: clearance) ? candidate : previous
     }
 
     /// Invisible RoomPlan furniture boxes let real furniture hide the virtual
