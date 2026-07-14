@@ -85,7 +85,7 @@ final class RaceGame {
     private(set) var roomObstacleCount = 0
     /// Uniform scale of the circuit root, including every kart and effect.
     private(set) var courseScale: Float = 1
-    /// Y-axis rotation shared by gestures and the 45-degree rotate button.
+    /// Y-axis rotation accumulated by the two-finger rotation gesture.
     private(set) var courseRotation: Float = 0
 
     var canStart: Bool { mode != .roomDrive || roomStartPlaced }
@@ -249,12 +249,6 @@ final class RaceGame {
         moveCourse(to: anchorRoot.convert(position: point, from: nil))
     }
 
-    /// Spins the whole course 45° on the floor, for rooms where the long
-    /// side doesn't match the anchor's orientation.
-    func rotateCourse() {
-        setCourseRotation(courseRotation + .pi / 4)
-    }
-
     /// Rotates the circuit and every child around its center without changing
     /// the real-world surface where it was placed.
     func setCourseRotation(_ angle: Float) {
@@ -272,14 +266,6 @@ final class RaceGame {
             min(Self.maximumCourseScale, newScale)
         )
         root.scale = SIMD3(repeating: courseScale)
-    }
-
-    func adjustCourseScale(by amount: Float) {
-        setCourseScale(courseScale + amount)
-    }
-
-    func resetCourseScale() {
-        setCourseScale(1)
     }
 
     // MARK: - Room free drive

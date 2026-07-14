@@ -145,8 +145,6 @@ struct GameOverlayView: View {
                 if game.mode == .roomDrive {
                     roomDriveSetup
                 } else {
-                    courseScaleControls
-
                     Text("コーナー中にブレーキをタップでドリフト!\n長く滑るほどミニターボ")
                         .font(.caption.bold())
                         .multilineTextAlignment(.center)
@@ -182,48 +180,6 @@ struct GameOverlayView: View {
                 : "まず部屋をスキャンしてください"
         }
         return "床やテーブルをタップしてコース移動\nドラッグで移動・二本指でサイズ／向き調整"
-    }
-
-    private var courseScaleControls: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "arrow.up.left.and.arrow.down.right")
-
-            Button {
-                game.adjustCourseScale(by: -0.1)
-            } label: {
-                Image(systemName: "minus")
-                    .frame(width: 28, height: 28)
-                    .background(.white.opacity(0.14), in: Circle())
-            }
-            .disabled(game.courseScale <= RaceGame.minimumCourseScale)
-
-            Text("\(game.courseScale, format: .number.precision(.fractionLength(2)))×")
-                .monospacedDigit()
-                .frame(minWidth: 48)
-
-            Button {
-                game.adjustCourseScale(by: 0.1)
-            } label: {
-                Image(systemName: "plus")
-                    .frame(width: 28, height: 28)
-                    .background(.white.opacity(0.14), in: Circle())
-            }
-            .disabled(game.courseScale >= RaceGame.maximumCourseScale)
-
-            Button("1.0×") {
-                game.resetCourseScale()
-            }
-            .padding(.horizontal, 7)
-            .frame(height: 28)
-            .background(.white.opacity(0.14), in: Capsule())
-            .disabled(abs(game.courseScale - 1) < 0.005)
-        }
-        .font(.caption.bold())
-        .foregroundStyle(.white)
-        .buttonStyle(.plain)
-        .padding(.horizontal, 10)
-        .padding(.vertical, 7)
-        .background(.black.opacity(0.45), in: Capsule())
     }
 
     @ViewBuilder
@@ -350,20 +306,6 @@ struct HUDView: View {
                         }
                         .buttonStyle(.plain)
                     }
-                    #if !targetEnvironment(simulator)
-                    if game.phase == .ready && game.mode != .roomDrive {
-                        // Spins the course a quarter turn on the floor.
-                        Button {
-                            game.rotateCourse()
-                        } label: {
-                            Image(systemName: "rotate.right")
-                                .font(.title3.bold())
-                                .padding(10)
-                                .background(.black.opacity(0.45), in: Circle())
-                        }
-                        .buttonStyle(.plain)
-                    }
-                    #endif
                     Menu {
                         Toggle("傾きで操作", isOn: $game.tiltSteeringEnabled)
                         Toggle("ゴースト表示", isOn: $game.ghostEnabled)
