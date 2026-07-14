@@ -56,8 +56,8 @@ final class RaceGame {
     // MARK: - State observed by the HUD
 
     private(set) var phase: Phase = .ready
-    /// False while AR is still searching for a floor plane; always true on
-    /// platforms without a floor anchor (simulator, macOS).
+    /// False while AR is still searching for a horizontal course surface;
+    /// always true on platforms without a surface anchor (simulator, macOS).
     private(set) var isCourseAnchored = true
     var mode: Mode = .timeAttack {
         didSet {
@@ -221,35 +221,29 @@ final class RaceGame {
         placeCarsOnGrid()
     }
 
-    /// Floor target for AR anchoring: any horizontal floor of 0.6 x 0.6 m+.
-    static var floorAnchorTarget: AnchoringComponent.Target {
-        .plane(.horizontal, classification: .floor, minimumBounds: [0.6, 0.6])
+    /// Initial AR target. A modest unclassified horizontal plane lets the
+    /// circuit start on either a floor or a tabletop.
+    static var courseSurfaceAnchorTarget: AnchoringComponent.Target {
+        .plane(.horizontal, classification: .any, minimumBounds: [0.3, 0.3])
     }
 
-    /// Anchors the scene to the floor (called once from AR setup).
-    func installFloorAnchor() {
-        anchorRoot.components.set(AnchoringComponent(Self.floorAnchorTarget))
+    /// Anchors the scene to the first usable course surface found by AR.
+    func installCourseSurfaceAnchor() {
+        anchorRoot.components.set(AnchoringComponent(Self.courseSurfaceAnchorTarget))
     }
 
-    /// Moves the course center to a floor point (in `anchorRoot` space),
-    /// clamped so it can't be flung out of reach.
+    /// Moves the course center to a point in `anchorRoot` space, including its
+    /// height so a tabletop does not collapse back down onto the floor.
     func moveCourse(to point: SIMD3<Float>) {
         guard phase == .ready, mode != .roomDrive else { return }
-        root.position = [
-            max(-2, min(2, point.x)), 0, max(-2, min(2, point.z)),
-        ]
+        root.position = point
     }
 
-    /// Moves the course to where a world-space ray — the camera's aim —
-    /// meets the floor. Ignored unless the ray points down at it.
-    func moveCourse(alongRayFrom origin: SIMD3<Float>, direction: SIMD3<Float>) {
-        guard phase == .ready else { return }
-        let localOrigin = anchorRoot.convert(position: origin, from: nil)
-        let localDirection = anchorRoot.convert(direction: direction, from: nil)
-        guard localDirection.y < -0.05 else { return }
-        let distance = -localOrigin.y / localDirection.y
-        guard distance > 0, distance < 15 else { return }
-        moveCourse(to: localOrigin + localDirection * distance)
+    /// Converts a raycast result from the shared AR world into the current
+    /// anchor's local coordinates before moving the circuit.
+    func moveCourse(toWorldPoint point: SIMD3<Float>) {
+        guard phase == .ready, mode != .roomDrive, isCourseAnchored else { return }
+        moveCourse(to: anchorRoot.convert(position: point, from: nil))
     }
 
     /// Spins the whole course 45° on the floor, for rooms where the long

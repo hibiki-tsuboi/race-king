@@ -32,12 +32,12 @@ struct GameOverlayView: View {
         switch game.phase {
         case .ready:
             if game.mode != .roomDrive && !game.isCourseAnchored {
-                // AR is still scanning: no course to race on yet.
+                // AR is still scanning: no horizontal course surface yet.
                 VStack(spacing: 14) {
                     ProgressView()
                         .controlSize(.large)
                         .tint(.white)
-                    Text("床を探しています…\n端末をゆっくり動かして床を映してください")
+                    Text("床やテーブルを探しています…\n設置したい面をゆっくり映してください")
                         .font(.callout.bold())
                         .multilineTextAlignment(.center)
                         .foregroundStyle(.white)
@@ -181,7 +181,7 @@ struct GameOverlayView: View {
                 ? "床に向けてタップでスタート位置を決定"
                 : "まず部屋をスキャンしてください"
         }
-        return "タップ／長押しドラッグでコース移動\n二本指ピンチでサイズ調整"
+        return "床やテーブルをタップしてコース移動\nドラッグで追従・二本指ピンチでサイズ調整"
     }
 
     private var courseScaleControls: some View {

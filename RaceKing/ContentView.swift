@@ -22,6 +22,7 @@ struct ContentView: View {
     @State private var isConfiguringSpatialTracking = false
     @State private var roomScanError: String?
     @State private var courseScaleAtPinchStart: Float?
+    @State private var realityViewSize = CGSize.zero
     @State private var updateSubscription: EventSubscription?
     @Environment(\.scenePhase) private var scenePhase
 
@@ -37,7 +38,7 @@ struct ContentView: View {
                 #else
                 // AR: show the real room and anchor the circuit to the floor.
                 content.camera = .spatialTracking
-                game.installFloorAnchor()
+                game.installCourseSurfaceAnchor()
                 // Camera pose feed for aim-based course placement.
                 game.cameraRig.components.set(AnchoringComponent(.camera))
                 content.add(game.cameraRig)
@@ -65,17 +66,21 @@ struct ContentView: View {
             .realityViewCameraControls(.orbit)
             #else
             .realityViewCameraControls(game.virtualModeActive ? .orbit : .none)
-            // AR: tap moves the course to the aimed floor point; holding a
-            // drag carries it along the aim continuously.
-            .onTapGesture { moveCourseTowardAim() }
+            // AR: use the actual touch location rather than the camera center.
+            .onTapGesture(coordinateSpace: .local) { location in
+                placeCourse(at: location)
+            }
             .simultaneousGesture(
                 DragGesture(minimumDistance: 15)
-                    .onChanged { _ in
-                        if game.mode != .roomDrive { moveCourseTowardAim() }
+                    .onChanged { value in
+                        if game.mode != .roomDrive { placeCourse(at: value.location) }
                     }
             )
             .simultaneousGesture(courseScaleGesture)
             #endif
+            .onGeometryChange(for: CGSize.self, of: { $0.size }) {
+                realityViewSize = $0
+            }
             .ignoresSafeArea()
 
             GameOverlayView(
@@ -238,20 +243,39 @@ struct ContentView: View {
             }
     }
 
-    /// Casts the camera's aim onto either the circuit floor or scanned room.
-    private func moveCourseTowardAim() {
-        guard !game.virtualModeActive else { return }
-        let transform = game.cameraRig.transformMatrix(relativeTo: nil)
-        let origin = SIMD3<Float>(
-            transform.columns.3.x, transform.columns.3.y, transform.columns.3.z
+    /// Converts the touched viewport point into an AR ray. Normal circuits
+    /// use the first horizontal surface hit; RoomPlan intersects the same ray
+    /// with its captured floor so both modes honor the visible tap location.
+    private func placeCourse(at screenPoint: CGPoint) {
+        guard !game.virtualModeActive,
+              realityViewSize.width > 0, realityViewSize.height > 0,
+              let frame = arSession.currentFrame else { return }
+
+        let normalizedViewPoint = CGPoint(
+            x: max(0, min(1, screenPoint.x / realityViewSize.width)),
+            y: max(0, min(1, screenPoint.y / realityViewSize.height))
         )
-        let forward = -SIMD3<Float>(
-            transform.columns.2.x, transform.columns.2.y, transform.columns.2.z
+        let orientation = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .first(where: { $0.activationState == .foregroundActive })?
+            .effectiveGeometry.interfaceOrientation ?? .portrait
+        let viewToImage = frame.displayTransform(
+            for: orientation, viewportSize: realityViewSize
+        ).inverted()
+        let imagePoint = normalizedViewPoint.applying(viewToImage)
+        let query = frame.raycastQuery(
+            from: imagePoint, allowing: .estimatedPlane, alignment: .horizontal
         )
+
         if game.mode == .roomDrive {
-            game.placeRoomStart(alongRayFrom: origin, direction: forward)
-        } else {
-            game.moveCourse(alongRayFrom: origin, direction: forward)
+            game.placeRoomStart(
+                alongRayFrom: query.origin, direction: query.direction
+            )
+        } else if let result = arSession.raycast(query).first {
+            let translation = result.worldTransform.columns.3
+            game.moveCourse(toWorldPoint: [
+                translation.x, translation.y, translation.z,
+            ])
         }
     }
     #endif
