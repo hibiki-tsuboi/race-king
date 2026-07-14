@@ -149,4 +149,25 @@ struct CarPhysics {
         speed *= max(0, 1 - 0.9 * impact)
         return impact
     }
+
+    /// Nudges a forward-moving car toward the course direction after it hits
+    /// a guardrail. Glancing contacts get a subtle correction, while a
+    /// head-on impact turns the car far enough to prevent repeated collisions.
+    mutating func assistAlongGuardrail(
+        trackTangent: SIMD3<Float>, impact: Float
+    ) {
+        guard speed > 0, impact > 0.05 else { return }
+
+        let targetHeading = atan2(trackTangent.x, trackTangent.z)
+        let angleDelta = atan2(
+            sin(targetHeading - heading),
+            cos(targetHeading - heading)
+        )
+        // Do not interfere when the player is deliberately facing backward.
+        guard abs(angleDelta) < .pi * 0.6 else { return }
+
+        let correction = min(0.85, 0.15 + 0.7 * impact)
+        heading += angleDelta * correction
+        slip *= 1 - correction
+    }
 }

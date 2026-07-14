@@ -487,8 +487,8 @@ final class RaceGame {
         boostFlame?.isEnabled = false
     }
 
-    /// Keeps the player between the barrier walls: projects the car back
-    /// inside the corridor and scrubs speed. Returns impact strength 0...1.
+    /// Keeps the player between the barrier walls, scrubs speed, and nudges
+    /// forward-facing cars along the guardrail. Returns impact strength 0...1.
     @discardableResult
     private func collidePlayerWithWalls() -> Float {
         let offset = layout.signedOffset(car.position)
@@ -496,7 +496,11 @@ final class RaceGame {
         guard abs(offset) > limit else { return 0 }
         let normal = layout.lateralNormal(at: car.position)
         car.position += normal * (max(-limit, min(limit, offset)) - offset)
-        return physics.hitWall(normal: normal)
+        let impact = physics.hitWall(normal: normal)
+        let trackTangent = SIMD3<Float>(normal.z, 0, -normal.x)
+        physics.assistAlongGuardrail(trackTangent: trackTangent, impact: impact)
+        car.orientation = simd_quatf(angle: physics.heading, axis: [0, 1, 0])
+        return impact
     }
 
     /// Gently pushes overlapping karts apart (there is no hard collision).
