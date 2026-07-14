@@ -5,6 +5,9 @@
 xcuserdata/
 *.xcuserstate
 
+# JetBrains IDE
+.idea/
+
 # ビルド成果物
 build/
 DerivedData/
