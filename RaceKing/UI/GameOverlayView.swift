@@ -188,6 +188,29 @@ struct GameOverlayView: View {
                     Text("家具や壁から離れた床をタップしてください")
                         .multilineTextAlignment(.center)
                 }
+
+                Divider()
+                    .overlay(.white.opacity(0.25))
+
+                Toggle(isOn: $game.roomModelVisible) {
+                    Label("スキャンモデルを表示", systemImage: "cube.transparent")
+                }
+                .tint(.cyan)
+
+                if game.roomModelVisible {
+                    HStack(spacing: 8) {
+                        Text("表示濃度")
+                        Slider(
+                            value: $game.roomModelOpacity,
+                            in: RaceGame.minimumRoomModelOpacity...RaceGame.maximumRoomModelOpacity
+                        )
+                        .tint(.cyan)
+                        .frame(width: 120)
+                        Text("\(Int(game.roomModelOpacity * 100))%")
+                            .monospacedDigit()
+                            .frame(width: 34, alignment: .trailing)
+                    }
+                }
             }
             .font(.caption.bold())
             .foregroundStyle(.white)

@@ -7,10 +7,21 @@ import Foundation
 import RealityKit
 import RoomPlan
 import simd
+#if canImport(UIKit)
+import UIKit
+#elseif canImport(AppKit)
+import AppKit
+#endif
 
 /// A RoomPlan scan reduced to the floor and furniture geometry needed by the
 /// arcade physics. Coordinates stay in the shared ARSession's world space.
 struct RoomDriveEnvironment {
+    struct Wall {
+        let identifier: UUID
+        let transform: simd_float4x4
+        let dimensions: SIMD3<Float>
+    }
+
     struct Obstacle {
         let identifier: UUID
         let transform: simd_float4x4
@@ -22,6 +33,22 @@ struct RoomDriveEnvironment {
         let position: SIMD3<Float>
         /// Points from the driveable area toward the barrier when possible.
         let normal: SIMD3<Float>
+    }
+
+    /// Horizontal dimensions used to keep the rendered kart body outside the
+    /// scanned room geometry, plus a small allowance for RoomPlan variance.
+    struct CarFootprint {
+        let halfWidth: Float
+        let halfLength: Float
+        let safetyMargin: Float
+
+        func clearance(along normal: SIMD2<Float>, heading: Float) -> Float {
+            let forward = SIMD2<Float>(sin(heading), cos(heading))
+            let right = SIMD2<Float>(cos(heading), -sin(heading))
+            return abs(simd_dot(normal, right)) * halfWidth
+                + abs(simd_dot(normal, forward)) * halfLength
+                + safetyMargin
+        }
     }
 
     enum ScanError: LocalizedError {
@@ -38,6 +65,7 @@ struct RoomDriveEnvironment {
     /// Floor outline in AR world XZ coordinates.
     let floorPolygon: [SIMD2<Float>]
     let floorHeight: Float
+    let walls: [Wall]
     let obstacles: [Obstacle]
 
     init(capturedRoom: CapturedRoom) throws {
@@ -55,6 +83,17 @@ struct RoomDriveEnvironment {
             / Float(floor.points.count)
         floorPolygon = floor.points.map { SIMD2($0.x, $0.z) }
         floorHeight = detectedFloorHeight
+
+        walls = capturedRoom.walls.compactMap { wall in
+            guard wall.dimensions.x > 0.04, wall.dimensions.y > 0.04 else {
+                return nil
+            }
+            return Wall(
+                identifier: wall.identifier,
+                transform: wall.transform,
+                dimensions: wall.dimensions
+            )
+        }
 
         obstacles = capturedRoom.objects.compactMap { object in
             let dimensions = object.dimensions
@@ -94,33 +133,38 @@ struct RoomDriveEnvironment {
     /// Blocks movement into a floor edge or furniture box while preserving
     /// the component parallel to the barrier so glancing contacts can slide.
     func collision(
-        from previous: SIMD3<Float>, to proposed: SIMD3<Float>, clearance: Float = 0.035
+        from previous: SIMD3<Float>, to proposed: SIMD3<Float>,
+        heading: Float, footprint: CarFootprint
     ) -> Collision? {
         let point = SIMD2(proposed.x, proposed.z)
         let inside = Self.contains(point, polygon: floorPolygon)
         let closestEdge = Self.closestPointOnPolygon(to: point, polygon: floorPolygon)
-        if !inside || simd_distance(point, closestEdge) < clearance {
-            let outward = inside ? closestEdge - point : point - closestEdge
-            let fallback = SIMD2(proposed.x - previous.x, proposed.z - previous.z)
-            let normal2D = Self.normalized(outward, fallback: fallback)
+        let outward = inside ? closestEdge - point : point - closestEdge
+        let fallback = SIMD2(proposed.x - previous.x, proposed.z - previous.z)
+        let normal2D = Self.normalized(outward, fallback: fallback)
+        let edgeClearance = footprint.clearance(along: normal2D, heading: heading)
+        if !inside || simd_distance(point, closestEdge) < edgeClearance {
             let normal = SIMD3<Float>(normal2D.x, 0, normal2D.y)
             return Collision(
                 position: slidePosition(
                     from: previous, to: proposed, normal: normal,
-                    clearance: clearance
+                    heading: heading, footprint: footprint
                 ),
                 normal: normal
             )
         }
 
         for obstacle in obstacles {
-            guard let normal = obstacleNormal(at: proposed, obstacle: obstacle, clearance: clearance) else {
+            guard let normal = obstacleNormal(
+                at: proposed, obstacle: obstacle,
+                heading: heading, footprint: footprint
+            ) else {
                 continue
             }
             return Collision(
                 position: slidePosition(
                     from: previous, to: proposed, normal: normal,
-                    clearance: clearance
+                    heading: heading, footprint: footprint
                 ),
                 normal: normal
             )
@@ -130,13 +174,15 @@ struct RoomDriveEnvironment {
 
     private func slidePosition(
         from previous: SIMD3<Float>, to proposed: SIMD3<Float>,
-        normal: SIMD3<Float>, clearance: Float
+        normal: SIMD3<Float>, heading: Float, footprint: CarFootprint
     ) -> SIMD3<Float> {
         let movement = proposed - previous
         let slide = movement - normal * simd_dot(movement, normal)
         var candidate = previous + slide
         candidate.y = floorHeight
-        return isDriveable(candidate, clearance: clearance) ? candidate : previous
+        return isDriveable(candidate, heading: heading, footprint: footprint)
+            ? candidate
+            : previous
     }
 
     /// Invisible RoomPlan furniture boxes let real furniture hide the virtual
@@ -157,6 +203,71 @@ struct RoomDriveEnvironment {
         return root
     }
 
+    /// Colored RoomPlan proxies show exactly which walls, furniture boxes,
+    /// and floor boundary the game is using while the camera remains visible.
+    func makeVisualizationRoot() -> Entity {
+        let root = Entity()
+        root.name = "roomVisualization"
+        let wallMaterial = UnlitMaterial(
+            color: .init(red: 0.15, green: 0.65, blue: 1, alpha: 1)
+        )
+        let obstacleMaterial = UnlitMaterial(
+            color: .init(red: 1, green: 0.48, blue: 0.12, alpha: 1)
+        )
+        let boundaryMaterial = UnlitMaterial(
+            color: .init(red: 0.2, green: 1, blue: 0.55, alpha: 1)
+        )
+
+        for wall in walls {
+            let mesh = MeshResource.generateBox(
+                width: wall.dimensions.x,
+                height: wall.dimensions.y,
+                depth: max(wall.dimensions.z, 0.012)
+            )
+            let entity = ModelEntity(mesh: mesh, materials: [wallMaterial])
+            entity.name = "roomWall-\(wall.identifier.uuidString)"
+            entity.transform = Transform(matrix: wall.transform)
+            root.addChild(entity)
+        }
+
+        for obstacle in obstacles {
+            // Keep this shell just outside the matching occlusion box so it
+            // remains visible without z-fighting.
+            let mesh = MeshResource.generateBox(
+                width: obstacle.dimensions.x + 0.004,
+                height: obstacle.dimensions.y + 0.004,
+                depth: obstacle.dimensions.z + 0.004
+            )
+            let entity = ModelEntity(mesh: mesh, materials: [obstacleMaterial])
+            entity.name = "visibleRoomObstacle-\(obstacle.identifier.uuidString)"
+            entity.transform = Transform(matrix: obstacle.transform)
+            root.addChild(entity)
+        }
+
+        for index in floorPolygon.indices {
+            let start = floorPolygon[index]
+            let end = floorPolygon[(index + 1) % floorPolygon.count]
+            let edge = end - start
+            let length = simd_length(edge)
+            guard length > 0.01 else { continue }
+            let entity = ModelEntity(
+                mesh: .generateBox(width: 0.012, height: 0.006, depth: length),
+                materials: [boundaryMaterial]
+            )
+            entity.name = "roomFloorBoundary-\(index)"
+            entity.position = [
+                (start.x + end.x) / 2,
+                floorHeight + 0.003,
+                (start.y + end.y) / 2,
+            ]
+            entity.orientation = simd_quatf(
+                angle: atan2(edge.x, edge.y), axis: [0, 1, 0]
+            )
+            root.addChild(entity)
+        }
+        return root
+    }
+
     private func isDriveable(_ point: SIMD3<Float>, clearance: Float) -> Bool {
         let point2D = SIMD2(point.x, point.z)
         guard Self.contains(point2D, polygon: floorPolygon) else { return false }
@@ -169,12 +280,65 @@ struct RoomDriveEnvironment {
         }
     }
 
+    private func isDriveable(
+        _ point: SIMD3<Float>, heading: Float, footprint: CarFootprint
+    ) -> Bool {
+        let point2D = SIMD2(point.x, point.z)
+        guard Self.contains(point2D, polygon: floorPolygon) else { return false }
+        let closestEdge = Self.closestPointOnPolygon(
+            to: point2D, polygon: floorPolygon
+        )
+        let normal = Self.normalized(closestEdge - point2D, fallback: [0, 1])
+        guard simd_distance(point2D, closestEdge)
+                >= footprint.clearance(along: normal, heading: heading) else {
+            return false
+        }
+        return obstacles.allSatisfy {
+            obstacleNormal(
+                at: point, obstacle: $0,
+                heading: heading, footprint: footprint
+            ) == nil
+        }
+    }
+
     private func obstacleNormal(
         at point: SIMD3<Float>, obstacle: Obstacle, clearance: Float
     ) -> SIMD3<Float>? {
+        obstacleNormal(
+            at: point, obstacle: obstacle,
+            expansionX: clearance, expansionZ: clearance
+        )
+    }
+
+    private func obstacleNormal(
+        at point: SIMD3<Float>, obstacle: Obstacle,
+        heading: Float, footprint: CarFootprint
+    ) -> SIMD3<Float>? {
+        let forward = SIMD3<Float>(sin(heading), 0, cos(heading))
+        let right = SIMD3<Float>(cos(heading), 0, -sin(heading))
+        let localForward4 = obstacle.inverseTransform
+            * SIMD4(forward.x, forward.y, forward.z, 0)
+        let localRight4 = obstacle.inverseTransform
+            * SIMD4(right.x, right.y, right.z, 0)
+        let expansionX = abs(localRight4.x) * footprint.halfWidth
+            + abs(localForward4.x) * footprint.halfLength
+            + footprint.safetyMargin
+        let expansionZ = abs(localRight4.z) * footprint.halfWidth
+            + abs(localForward4.z) * footprint.halfLength
+            + footprint.safetyMargin
+        return obstacleNormal(
+            at: point, obstacle: obstacle,
+            expansionX: expansionX, expansionZ: expansionZ
+        )
+    }
+
+    private func obstacleNormal(
+        at point: SIMD3<Float>, obstacle: Obstacle,
+        expansionX: Float, expansionZ: Float
+    ) -> SIMD3<Float>? {
         let local = obstacle.inverseTransform * SIMD4(point.x, point.y, point.z, 1)
-        let halfX = obstacle.dimensions.x / 2 + clearance
-        let halfZ = obstacle.dimensions.z / 2 + clearance
+        let halfX = obstacle.dimensions.x / 2 + expansionX
+        let halfZ = obstacle.dimensions.z / 2 + expansionZ
         guard abs(local.x) < halfX, abs(local.z) < halfZ else { return nil }
 
         let penetrationX = halfX - abs(local.x)

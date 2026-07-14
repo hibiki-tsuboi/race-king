@@ -52,6 +52,8 @@ final class RaceGame {
     static let raceLapTotal = 3
     static let minimumCourseScale: Float = 0.5
     static let maximumCourseScale: Float = 2.0
+    static let minimumRoomModelOpacity: Float = 0.08
+    static let maximumRoomModelOpacity: Float = 0.65
 
     // MARK: - State observed by the HUD
 
@@ -97,6 +99,18 @@ final class RaceGame {
     }
     var tiltSteeringEnabled: Bool {
         didSet { UserDefaults.standard.set(tiltSteeringEnabled, forKey: "tiltSteering") }
+    }
+    var roomModelVisible: Bool {
+        didSet {
+            UserDefaults.standard.set(roomModelVisible, forKey: "roomModelVisible")
+            applyRoomVisualizationSettings()
+        }
+    }
+    var roomModelOpacity: Float {
+        didSet {
+            UserDefaults.standard.set(roomModelOpacity, forKey: "roomModelOpacity")
+            applyRoomVisualizationSettings()
+        }
     }
 
     // MARK: - Player input (written by touch controls or tilt)
@@ -155,8 +169,14 @@ final class RaceGame {
     private var aiDrivers: [AIDriver] = []
     private var roomEnvironment: RoomDriveEnvironment?
     private var roomOcclusionRoot: Entity?
+    private var roomVisualizationRoot: Entity?
     private var roomStartPosition: SIMD3<Float>?
     private var roomStartHeading: Float = 0
+    private var roomCarFootprint = RoomDriveEnvironment.CarFootprint(
+        halfWidth: 0.026,
+        halfLength: 0.048,
+        safetyMargin: 0.012
+    )
 
     /// Car pose in its active scene root's space, for follow cameras and tests.
     var carPosition: SIMD3<Float> { car.position }
@@ -208,6 +228,15 @@ final class RaceGame {
         aiDrivers = AIDriver.defaultOpponents()
         ghostEnabled = UserDefaults.standard.object(forKey: "ghostEnabled") as? Bool ?? true
         tiltSteeringEnabled = UserDefaults.standard.bool(forKey: "tiltSteering")
+        roomModelVisible = UserDefaults.standard.object(forKey: "roomModelVisible")
+            as? Bool ?? true
+        let savedRoomModelOpacity = UserDefaults.standard.object(
+            forKey: "roomModelOpacity"
+        ) == nil ? 0.28 : UserDefaults.standard.float(forKey: "roomModelOpacity")
+        roomModelOpacity = min(
+            Self.maximumRoomModelOpacity,
+            max(Self.minimumRoomModelOpacity, savedRoomModelOpacity)
+        )
 
         anchorRoot.addChild(root)
         roomRoot.components.set(AnchoringComponent(.world(transform: matrix_identity_float4x4)))
@@ -218,6 +247,7 @@ final class RaceGame {
         glowBlue = car.findEntity(named: "glowBlue")
         glowOrange = car.findEntity(named: "glowOrange")
         boostFlame = car.findEntity(named: "boostFlame")
+        refreshRoomCarFootprint()
 
         let savedBest = UserDefaults.standard.double(forKey: bestLapKey)
         bestLapTime = savedBest > 0 ? savedBest : nil
@@ -284,6 +314,12 @@ final class RaceGame {
         roomOcclusionRoot = occlusionRoot
         roomRoot.addChild(occlusionRoot)
 
+        roomVisualizationRoot?.removeFromParent()
+        let visualizationRoot = environment.makeVisualizationRoot()
+        roomVisualizationRoot = visualizationRoot
+        roomRoot.addChild(visualizationRoot)
+        applyRoomVisualizationSettings()
+
         if mode != .roomDrive { mode = .roomDrive }
         placeCarsOnGrid()
     }
@@ -318,6 +354,7 @@ final class RaceGame {
         glowBlue = car.findEntity(named: "glowBlue")
         glowOrange = car.findEntity(named: "glowOrange")
         boostFlame = car.findEntity(named: "boostFlame")
+        refreshRoomCarFootprint()
     }
 
     /// Applies an imported model to one AI kart (nil restores its tinted kart).
@@ -428,7 +465,12 @@ final class RaceGame {
             )
             var proposed = previous + travel
             proposed.y = baseHeight
-            if let collision = environment.collision(from: previous, to: proposed) {
+            if let collision = environment.collision(
+                from: previous,
+                to: proposed,
+                heading: physics.heading,
+                footprint: roomCarFootprint
+            ) {
                 car.position = collision.position
                 wallNormal = collision.normal
             } else {
@@ -758,6 +800,36 @@ final class RaceGame {
         guard car.parent !== parent else { return }
         car.removeFromParent()
         parent.addChild(car)
+    }
+
+    private func applyRoomVisualizationSettings() {
+        roomVisualizationRoot?.isEnabled = roomModelVisible
+        roomVisualizationRoot?.components.set(
+            OpacityComponent(opacity: roomModelOpacity)
+        )
+    }
+
+    /// Includes imported models and their normalized yaw so collision follows
+    /// the body the player actually sees, rather than a fixed center point.
+    private func refreshRoomCarFootprint() {
+        let effectNames: Set<String> = ["glowBlue", "glowOrange", "boostFlame"]
+        var minimum = SIMD3<Float>(repeating: .greatestFiniteMagnitude)
+        var maximum = SIMD3<Float>(repeating: -.greatestFiniteMagnitude)
+        var foundBody = false
+        for child in car.children where !effectNames.contains(child.name) {
+            let bounds = child.visualBounds(relativeTo: car)
+            minimum = simd_min(minimum, bounds.min)
+            maximum = simd_max(maximum, bounds.max)
+            foundBody = true
+        }
+        guard foundBody else { return }
+        let extents = maximum - minimum
+        guard extents.x.isFinite, extents.z.isFinite else { return }
+        roomCarFootprint = RoomDriveEnvironment.CarFootprint(
+            halfWidth: min(0.065, max(0.026, extents.x / 2)),
+            halfLength: min(0.065, max(0.048, extents.z / 2)),
+            safetyMargin: 0.012
+        )
     }
 
     private func placePlayer(back: Float, lateral: Float) {
