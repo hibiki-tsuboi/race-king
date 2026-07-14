@@ -3,16 +3,24 @@
 //  RaceKing
 //
 
-import SwiftUI
-import RealityKit
+import ARKit
 import AVFoundation
+import RealityKit
+import RoomPlan
+import SwiftUI
 
 struct ContentView: View {
     @State private var game = RaceGame()
     @State private var audio = GameAudio()
     @State private var haptics = Haptics()
     @State private var tilt = TiltSteering()
+    @State private var arSession = ARSession()
+    @State private var spatialTrackingSession = SpatialTrackingSession()
     @State private var cameraAccessDenied = false
+    @State private var showingRoomScan = false
+    @State private var isPreparingRoomScan = false
+    @State private var isConfiguringSpatialTracking = false
+    @State private var roomScanError: String?
     @State private var updateSubscription: EventSubscription?
     @Environment(\.scenePhase) private var scenePhase
 
@@ -35,6 +43,7 @@ struct ContentView: View {
                 #endif
 
                 content.add(game.anchorRoot)
+                content.add(game.roomRoot)
                 updateSubscription = content.subscribe(to: SceneEvents.Update.self) { event in
                     game.update(deltaTime: event.deltaTime)
                     audio.setEngine(
@@ -60,12 +69,19 @@ struct ContentView: View {
             .onTapGesture { moveCourseTowardAim() }
             .simultaneousGesture(
                 DragGesture(minimumDistance: 15)
-                    .onChanged { _ in moveCourseTowardAim() }
+                    .onChanged { _ in
+                        if game.mode != .roomDrive { moveCourseTowardAim() }
+                    }
             )
             #endif
             .ignoresSafeArea()
 
-            GameOverlayView(game: game)
+            GameOverlayView(
+                game: game,
+                roomPlanSupported: roomPlanSupported && !game.virtualModeActive,
+                canScanRoom: canScanRoom,
+                onScanRoom: startRoomScan
+            )
 
             if cameraAccessDenied && !game.virtualModeActive {
                 CameraDeniedView { game.activateVirtualMode() }
@@ -79,11 +95,55 @@ struct ContentView: View {
             }
             updateTiltSteering()
             refreshCameraAuthorization()
+            await runSpatialTracking()
         }
         .onChange(of: game.tiltSteeringEnabled) { updateTiltSteering() }
         .onChange(of: scenePhase) {
-            if scenePhase == .active { refreshCameraAuthorization() }
+            if scenePhase == .active {
+                refreshCameraAuthorization()
+                Task { await runSpatialTracking() }
+            }
         }
+        .fullScreenCover(
+            isPresented: $showingRoomScan,
+            onDismiss: { Task { await runSpatialTracking() } }
+        ) {
+            RoomScanView(
+                arSession: arSession,
+                onComplete: finishRoomScan,
+                onCancel: { showingRoomScan = false },
+                onError: { message in
+                    roomScanError = message
+                    showingRoomScan = false
+                }
+            )
+        }
+        .alert(
+            "部屋をスキャンできませんでした",
+            isPresented: Binding(
+                get: { roomScanError != nil },
+                set: { if !$0 { roomScanError = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(roomScanError ?? "")
+        }
+    }
+
+    private var roomPlanSupported: Bool {
+        #if targetEnvironment(simulator)
+        false
+        #else
+        RoomCaptureSession.isSupported
+        #endif
+    }
+
+    private var canScanRoom: Bool {
+        roomPlanSupported
+            && !game.virtualModeActive
+            && !cameraAccessDenied
+            && !isPreparingRoomScan
     }
 
     private func refreshCameraAuthorization() {
@@ -93,8 +153,71 @@ struct ContentView: View {
         #endif
     }
 
+    private func startRoomScan() {
+        guard roomPlanSupported else {
+            roomScanError = "部屋フリー走行には、LiDARスキャナを搭載したiPhoneまたはiPadが必要です。"
+            return
+        }
+        guard !game.virtualModeActive else {
+            roomScanError = "部屋のスキャンはARなしモードでは利用できません。アプリを再起動してARを有効にしてください。"
+            return
+        }
+        guard !cameraAccessDenied, !isPreparingRoomScan else { return }
+
+        isPreparingRoomScan = true
+        Task {
+            await spatialTrackingSession.stop()
+            showingRoomScan = true
+            isPreparingRoomScan = false
+        }
+    }
+
+    private func finishRoomScan(_ room: CapturedRoom) {
+        do {
+            game.configureRoom(try RoomDriveEnvironment(capturedRoom: room))
+        } catch {
+            roomScanError = error.localizedDescription
+        }
+        showingRoomScan = false
+    }
+
+    /// Runs RealityKit on the same ARSession RoomPlan uses, preserving the
+    /// scanned room's world coordinate system when capture finishes.
+    private func runSpatialTracking() async {
+        #if !targetEnvironment(simulator)
+        guard !showingRoomScan, !game.virtualModeActive,
+              !isConfiguringSpatialTracking else { return }
+        isConfiguringSpatialTracking = true
+        defer { isConfiguringSpatialTracking = false }
+
+        let spatialConfiguration = SpatialTrackingSession.Configuration(
+            tracking: [.camera, .world, .plane],
+            sceneUnderstanding: [.shadow, .occlusion],
+            camera: .back
+        )
+        let arConfiguration = ARWorldTrackingConfiguration()
+        arConfiguration.planeDetection = [.horizontal, .vertical]
+        if ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh) {
+            arConfiguration.sceneReconstruction = .mesh
+        }
+        let unavailable = await spatialTrackingSession.run(
+            spatialConfiguration,
+            session: arSession,
+            arConfiguration: arConfiguration
+        )
+        if unavailable?.missingCameraAuthorization == true {
+            cameraAccessDenied = true
+            return
+        }
+        // With the custom-session overload, the app owns the ARSession
+        // lifecycle. SpatialTrackingSession connects it to RealityKit, but
+        // doesn't start camera capture on the app's behalf.
+        arSession.run(arConfiguration)
+        #endif
+    }
+
     #if !targetEnvironment(simulator)
-    /// Casts the camera's aim onto the floor and moves the course there.
+    /// Casts the camera's aim onto either the circuit floor or scanned room.
     private func moveCourseTowardAim() {
         guard !game.virtualModeActive else { return }
         let transform = game.cameraRig.transformMatrix(relativeTo: nil)
@@ -104,7 +227,11 @@ struct ContentView: View {
         let forward = -SIMD3<Float>(
             transform.columns.2.x, transform.columns.2.y, transform.columns.2.z
         )
-        game.moveCourse(alongRayFrom: origin, direction: forward)
+        if game.mode == .roomDrive {
+            game.placeRoomStart(alongRayFrom: origin, direction: forward)
+        } else {
+            game.moveCourse(alongRayFrom: origin, direction: forward)
+        }
     }
     #endif
 
@@ -129,7 +256,7 @@ private struct CameraDeniedView: View {
                 .font(.largeTitle)
             Text("カメラへのアクセスが必要です")
                 .font(.headline.weight(.black))
-            Text("ARでレースコースを床に表示するために\nカメラを使用します。設定アプリで許可してください。")
+            Text("AR表示と部屋のスキャンにカメラを使用します。\n設定アプリで許可してください。")
                 .font(.callout)
                 .multilineTextAlignment(.center)
             Button {

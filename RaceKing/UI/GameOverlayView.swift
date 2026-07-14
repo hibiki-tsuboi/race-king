@@ -10,6 +10,9 @@ import UniformTypeIdentifiers
 /// HUD, touch controls, countdown, mode select, and results layered over the AR view.
 struct GameOverlayView: View {
     @Bindable var game: RaceGame
+    var roomPlanSupported = false
+    var canScanRoom = false
+    var onScanRoom: () -> Void = {}
 
     var body: some View {
         ZStack {
@@ -28,7 +31,7 @@ struct GameOverlayView: View {
     private var centerMessage: some View {
         switch game.phase {
         case .ready:
-            if !game.isCourseAnchored {
+            if game.mode != .roomDrive && !game.isCourseAnchored {
                 // AR is still scanning: no course to race on yet.
                 VStack(spacing: 14) {
                     ProgressView()
@@ -38,6 +41,20 @@ struct GameOverlayView: View {
                         .font(.callout.bold())
                         .multilineTextAlignment(.center)
                         .foregroundStyle(.white)
+                    if roomPlanSupported && canScanRoom {
+                        Button {
+                            game.mode = .roomDrive
+                            onScanRoom()
+                        } label: {
+                            Label("部屋をスキャンしてフリー走行", systemImage: "viewfinder")
+                                .font(.headline.bold())
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 20)
+                                .padding(.vertical, 10)
+                                .background(.blue.gradient, in: Capsule())
+                        }
+                        .buttonStyle(.plain)
+                    }
                     if game.canOfferVirtualMode {
                         Button {
                             game.activateVirtualMode()
@@ -103,9 +120,9 @@ struct GameOverlayView: View {
     }
 
     private var readyMenu: some View {
-        VStack(spacing: 18) {
+        VStack(spacing: 14) {
                 #if !targetEnvironment(simulator)
-                Text("床に向けてタップでコース移動\n長押しドラッグで追従")
+                Text(placementInstruction)
                     .font(.callout.bold())
                     .multilineTextAlignment(.center)
                     .foregroundStyle(.white)
@@ -116,35 +133,95 @@ struct GameOverlayView: View {
                 Picker("モード", selection: $game.mode) {
                     Text("タイムアタック").tag(RaceGame.Mode.timeAttack)
                     Text("VS AIレース").tag(RaceGame.Mode.race)
+                    if roomPlanSupported {
+                        Text("部屋").tag(RaceGame.Mode.roomDrive)
+                    }
                 }
                 .pickerStyle(.segmented)
-                .frame(maxWidth: 290)
+                .frame(maxWidth: roomPlanSupported ? 340 : 290)
                 .padding(6)
                 .background(.black.opacity(0.4), in: RoundedRectangle(cornerRadius: 12))
 
-                Text("コーナー中にブレーキをタップでドリフト!\n長く滑るほどミニターボ")
-                    .font(.caption.bold())
-                    .multilineTextAlignment(.center)
-                    .foregroundStyle(.white)
-                    .padding(8)
-                    .background(.black.opacity(0.4), in: RoundedRectangle(cornerRadius: 10))
-
-                Button {
-                    game.startRace()
-                } label: {
-                    Text("START")
-                        .font(.system(size: 30, weight: .black, design: .rounded))
+                if game.mode == .roomDrive {
+                    roomDriveSetup
+                } else {
+                    Text("コーナー中にブレーキをタップでドリフト!\n長く滑るほどミニターボ")
+                        .font(.caption.bold())
+                        .multilineTextAlignment(.center)
                         .foregroundStyle(.white)
-                        .padding(.horizontal, 44)
-                        .padding(.vertical, 14)
-                        .background(.red.gradient, in: Capsule())
+                        .padding(8)
+                        .background(.black.opacity(0.4), in: RoundedRectangle(cornerRadius: 10))
                 }
-                .buttonStyle(.plain)
+
+                if game.canStart {
+                    Button {
+                        game.startRace()
+                    } label: {
+                        Text(game.mode == .roomDrive ? "フリー走行" : "START")
+                            .font(.system(size: 30, weight: .black, design: .rounded))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 44)
+                            .padding(.vertical, 14)
+                            .background(.red.gradient, in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                }
         }
         // Anchored below the HUD instead of screen-centered, so it never
         // collides with the HUD on small screens and leaves the grid visible.
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .padding(.top, 170)
+    }
+
+    private var placementInstruction: String {
+        if game.mode == .roomDrive {
+            return game.hasScannedRoom
+                ? "床に向けてタップでスタート位置を決定"
+                : "まず部屋をスキャンしてください"
+        }
+        return "床に向けてタップでコース移動\n長押しドラッグで追従"
+    }
+
+    @ViewBuilder
+    private var roomDriveSetup: some View {
+        if game.hasScannedRoom {
+            VStack(spacing: 8) {
+                Text("障害物を \(game.roomObstacleCount) 個検出")
+                    .font(.caption.bold())
+                if game.roomStartPlaced {
+                    Label("スタート位置を設定しました", systemImage: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                } else {
+                    Text("家具や壁から離れた床をタップしてください")
+                        .multilineTextAlignment(.center)
+                }
+            }
+            .font(.caption.bold())
+            .foregroundStyle(.white)
+            .padding(10)
+            .background(.black.opacity(0.45), in: RoundedRectangle(cornerRadius: 10))
+
+            Button("部屋をスキャンし直す", action: onScanRoom)
+                .buttonStyle(.borderedProminent)
+                .tint(.blue)
+                .disabled(!canScanRoom)
+        } else if canScanRoom {
+            Button(action: onScanRoom) {
+                Label("部屋をスキャン", systemImage: "viewfinder")
+                    .font(.headline.bold())
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 5)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.blue)
+        } else {
+            Text("部屋のスキャンはARなしモードでは利用できません")
+                .font(.caption.bold())
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.white)
+                .padding(10)
+                .background(.black.opacity(0.5), in: RoundedRectangle(cornerRadius: 10))
+        }
     }
 }
 
@@ -230,7 +307,7 @@ struct HUDView: View {
                         .buttonStyle(.plain)
                     }
                     #if !targetEnvironment(simulator)
-                    if game.phase == .ready {
+                    if game.phase == .ready && game.mode != .roomDrive {
                         // Spins the course a quarter turn on the floor.
                         Button {
                             game.rotateCourse()
@@ -305,6 +382,8 @@ struct HUDView: View {
         case .race:
             let current = min(game.lapCount + 1, RaceGame.raceLapTotal)
             return "LAP \(current)/\(RaceGame.raceLapTotal)"
+        case .roomDrive:
+            return "FREE DRIVE"
         }
     }
 

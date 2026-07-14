@@ -31,8 +31,8 @@ enum GameEvent {
     case driftEnded(boostLevel: Int)
 }
 
-/// Drives the whole game: owns the scene entities, integrates car physics
-/// every frame, and runs the race state machine for both modes.
+/// Drives the whole game: owns the scene entities, integrates car physics,
+/// and runs circuit races or a RoomPlan-powered free drive.
 @Observable
 final class RaceGame {
     enum Phase: Equatable {
@@ -45,6 +45,7 @@ final class RaceGame {
     enum Mode: String, CaseIterable {
         case timeAttack
         case race
+        case roomDrive
     }
 
     /// Laps to the checkered flag in VS race mode.
@@ -76,6 +77,12 @@ final class RaceGame {
     private(set) var finalPosition: Int?
     /// Total elapsed time of the current VS race.
     private(set) var raceTime: TimeInterval = 0
+    /// RoomPlan scan state used by the free-drive setup UI.
+    private(set) var hasScannedRoom = false
+    private(set) var roomStartPlaced = false
+    private(set) var roomObstacleCount = 0
+
+    var canStart: Bool { mode != .roomDrive || roomStartPlaced }
 
     // MARK: - Settings (persisted)
 
@@ -103,6 +110,9 @@ final class RaceGame {
     let anchorRoot = Entity()
     /// Root of the course and cars, repositionable on the floor by the player.
     let root = Entity()
+    /// World-origin anchor for RoomPlan geometry, which is already expressed
+    /// in the shared ARSession's coordinate space.
+    let roomRoot = Entity()
     /// Follows the AR camera so course placement can use the aim direction.
     let cameraRig = Entity()
 
@@ -121,6 +131,7 @@ final class RaceGame {
     /// presentation the simulator uses. One-way until the next launch.
     func activateVirtualMode() {
         guard !virtualModeActive else { return }
+        if mode == .roomDrive { mode = .timeAttack }
         virtualModeActive = true
         anchorRoot.components.remove(AnchoringComponent.self)
         anchorRoot.transform = .identity
@@ -134,8 +145,12 @@ final class RaceGame {
     private let ghostCar: Entity
     private let checkpoints: [SIMD3<Float>]
     private var aiDrivers: [AIDriver] = []
+    private var roomEnvironment: RoomDriveEnvironment?
+    private var roomOcclusionRoot: Entity?
+    private var roomStartPosition: SIMD3<Float>?
+    private var roomStartHeading: Float = 0
 
-    /// Car pose in `root`'s space, for follow cameras and tests.
+    /// Car pose in its active scene root's space, for follow cameras and tests.
     var carPosition: SIMD3<Float> { car.position }
     var carHeading: Float { physics.heading }
     var speedRatio: Float { physics.speed / CarPhysics.maxSpeed }
@@ -186,6 +201,8 @@ final class RaceGame {
         tiltSteeringEnabled = UserDefaults.standard.bool(forKey: "tiltSteering")
 
         anchorRoot.addChild(root)
+        roomRoot.components.set(AnchoringComponent(.world(transform: matrix_identity_float4x4)))
+        roomRoot.isEnabled = false
         root.addChild(EntityFactory.makeTrack(layout: layout))
         root.addChild(car)
         root.addChild(ghostCar)
@@ -211,7 +228,7 @@ final class RaceGame {
     /// Moves the course center to a floor point (in `anchorRoot` space),
     /// clamped so it can't be flung out of reach.
     func moveCourse(to point: SIMD3<Float>) {
-        guard phase == .ready else { return }
+        guard phase == .ready, mode != .roomDrive else { return }
         root.position = [
             max(-2, min(2, point.x)), 0, max(-2, min(2, point.z)),
         ]
@@ -232,8 +249,50 @@ final class RaceGame {
     /// Spins the whole course 45° on the floor, for rooms where the long
     /// side doesn't match the anchor's orientation.
     func rotateCourse() {
-        guard phase == .ready else { return }
+        guard phase == .ready, mode != .roomDrive else { return }
         root.orientation = simd_quatf(angle: .pi / 4, axis: [0, 1, 0]) * root.orientation
+    }
+
+    // MARK: - Room free drive
+
+    /// Installs one RoomPlan result in the still-running AR world. The player
+    /// chooses a safe start point afterward by aiming at the scanned floor.
+    func configureRoom(_ environment: RoomDriveEnvironment) {
+        roomEnvironment = environment
+        hasScannedRoom = true
+        roomStartPlaced = false
+        roomStartPosition = nil
+        roomObstacleCount = environment.obstacles.count
+
+        roomOcclusionRoot?.removeFromParent()
+        let occlusionRoot = environment.makeOcclusionRoot()
+        roomOcclusionRoot = occlusionRoot
+        roomRoot.addChild(occlusionRoot)
+
+        if mode != .roomDrive { mode = .roomDrive }
+        placeCarsOnGrid()
+    }
+
+    /// Places the car where the camera is aiming. Returns false when the ray
+    /// misses the scanned floor or lands too close to furniture or a wall.
+    @discardableResult
+    func placeRoomStart(
+        alongRayFrom origin: SIMD3<Float>, direction: SIMD3<Float>
+    ) -> Bool {
+        guard mode == .roomDrive, phase == .ready,
+              let environment = roomEnvironment,
+              let point = environment.placementPoint(
+                  rayOrigin: origin, direction: direction
+              ) else { return false }
+
+        let horizontal = SIMD2(direction.x, direction.z)
+        roomStartHeading = simd_length(horizontal) > 0.05
+            ? atan2(direction.x, direction.z)
+            : 0
+        roomStartPosition = point
+        roomStartPlaced = true
+        placeCarsOnGrid()
+        return true
     }
 
     /// Applies an imported car model to the player and ghost cars in place
@@ -253,7 +312,7 @@ final class RaceGame {
     }
 
     func startRace() {
-        guard phase == .ready else { return }
+        guard phase == .ready, canStart else { return }
         countdownRemaining = 3
         countdownValue = 3
         phase = .countdown
@@ -277,12 +336,13 @@ final class RaceGame {
 
     /// Advances the game by one frame. Called from the scene's update event.
     func update(deltaTime: TimeInterval) {
-        let anchored = !anchorRoot.components.has(AnchoringComponent.self)
+        let anchored = mode == .roomDrive
+            || !anchorRoot.components.has(AnchoringComponent.self)
             || anchorRoot.isAnchored
         if anchored != isCourseAnchored { isCourseAnchored = anchored }
 
         // Offer the non-AR mode when floor detection keeps struggling.
-        if phase == .ready, !anchored, !virtualModeActive {
+        if mode != .roomDrive, phase == .ready, !anchored, !virtualModeActive {
             floorSearchTime += deltaTime
             if floorSearchTime >= 8, !canOfferVirtualMode {
                 canOfferVirtualMode = true
@@ -333,21 +393,48 @@ final class RaceGame {
 
     private func stepPlayer(_ dt: Float, deltaTime: TimeInterval) {
         updateDrift(deltaTime)
-        let offRoad = layout.distanceFromCenterline(car.position) > layout.roadWidth / 2 + 0.015
-        car.position += physics.step(
-            dt: dt, steeringInput: steeringInput,
-            throttle: throttleInput,
-            brake: brakeInput && !physics.isDrifting,
-            offRoad: offRoad
-        )
+        var offRoad = false
+        var impact: Float = 0
+        let baseHeight: Float
+
+        if mode == .roomDrive, let environment = roomEnvironment {
+            baseHeight = environment.floorHeight
+            var previous = car.position
+            previous.y = baseHeight
+            let movement = physics.step(
+                dt: dt, steeringInput: steeringInput,
+                throttle: throttleInput,
+                brake: brakeInput && !physics.isDrifting,
+                offRoad: false
+            )
+            var proposed = previous + movement
+            proposed.y = baseHeight
+            if let collision = environment.collision(from: previous, to: proposed) {
+                car.position = collision.position
+                impact = collidePlayerWithRoom(normal: collision.normal)
+            } else {
+                car.position = proposed
+            }
+        } else {
+            baseHeight = 0
+            offRoad = layout.distanceFromCenterline(car.position)
+                > layout.roadWidth / 2 + 0.015
+            car.position += physics.step(
+                dt: dt, steeringInput: steeringInput,
+                throttle: throttleInput,
+                brake: brakeInput && !physics.isDrifting,
+                offRoad: offRoad
+            )
+            impact = collidePlayerWithWalls()
+        }
+
         // A small hop when the drift kicks in.
         driftHopRemaining = max(0, driftHopRemaining - deltaTime)
-        car.position.y = driftHopRemaining > 0
+        car.position.y = baseHeight + (driftHopRemaining > 0
             ? sin(.pi * Float(1 - driftHopRemaining / 0.16)) * 0.01
-            : 0
+            : 0)
         car.orientation = simd_quatf(angle: physics.heading, axis: [0, 1, 0])
 
-        let impact = collidePlayerWithWalls()
         wallHitCooldown -= deltaTime
         if impact > 0.25, wallHitCooldown <= 0 {
             onEvent?(.wallHit)
@@ -374,7 +461,7 @@ final class RaceGame {
         if mode == .timeAttack {
             ghost.record(time: currentLapTime, position: car.position, heading: physics.heading)
         }
-        checkPlayerCheckpoints()
+        if mode != .roomDrive { checkPlayerCheckpoints() }
     }
 
     private func stepAI(_ dt: Float) {
@@ -470,7 +557,7 @@ final class RaceGame {
             Float.random(in: -0.012...0.012), 0.008, Float.random(in: -0.012...0.012)
         )
         puff.components.set(OpacityComponent(opacity: 0.65))
-        root.addChild(puff)
+        car.parent?.addChild(puff)
         smokePuffs.append((puff, 0))
     }
 
@@ -500,6 +587,16 @@ final class RaceGame {
         let trackTangent = SIMD3<Float>(normal.z, 0, -normal.x)
         physics.assistAlongGuardrail(trackTangent: trackTangent, impact: impact)
         car.orientation = simd_quatf(angle: physics.heading, axis: [0, 1, 0])
+        return impact
+    }
+
+    /// Furniture and floor edges have no fixed race direction, so the assist
+    /// chooses the barrier tangent closest to the car's current heading.
+    private func collidePlayerWithRoom(normal: SIMD3<Float>) -> Float {
+        let impact = physics.hitWall(normal: normal)
+        var tangent = SIMD3<Float>(normal.z, 0, -normal.x)
+        if simd_dot(physics.forward, tangent) < 0 { tangent = -tangent }
+        physics.assistAlongGuardrail(trackTangent: tangent, impact: impact)
         return impact
     }
 
@@ -590,6 +687,8 @@ final class RaceGame {
                 onEvent?(.lapCompleted(isBest: false))
                 currentLapTime = 0
             }
+        case .roomDrive:
+            break
         }
     }
 
@@ -601,8 +700,16 @@ final class RaceGame {
 
         switch mode {
         case .timeAttack:
+            root.isEnabled = true
+            roomRoot.isEnabled = false
+            movePlayer(to: root)
+            car.isEnabled = true
             placePlayer(back: 0.06, lateral: 0)
         case .race:
+            root.isEnabled = true
+            roomRoot.isEnabled = false
+            movePlayer(to: root)
+            car.isEnabled = true
             let slots: [(back: Float, lateral: Float)] =
                 [(0.08, -0.037), (0.08, 0.037), (0.17, -0.037)]
             for (driver, slot) in zip(aiDrivers, slots) {
@@ -610,7 +717,26 @@ final class RaceGame {
                 root.addChild(driver.entity)
             }
             placePlayer(back: 0.17, lateral: 0.037)
+        case .roomDrive:
+            root.isEnabled = false
+            roomRoot.isEnabled = roomEnvironment != nil
+            movePlayer(to: roomRoot)
+            guard let position = roomStartPosition else {
+                car.isEnabled = false
+                physics.reset(heading: 0)
+                return
+            }
+            car.isEnabled = true
+            car.position = position
+            physics.reset(heading: roomStartHeading)
+            car.orientation = simd_quatf(angle: physics.heading, axis: [0, 1, 0])
         }
+    }
+
+    private func movePlayer(to parent: Entity) {
+        guard car.parent !== parent else { return }
+        car.removeFromParent()
+        parent.addChild(car)
     }
 
     private func placePlayer(back: Float, lateral: Float) {
