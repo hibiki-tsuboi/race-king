@@ -50,6 +50,8 @@ final class RaceGame {
 
     /// Laps to the checkered flag in VS race mode.
     static let raceLapTotal = 3
+    static let minimumCourseScale: Float = 0.5
+    static let maximumCourseScale: Float = 2.0
 
     // MARK: - State observed by the HUD
 
@@ -81,6 +83,8 @@ final class RaceGame {
     private(set) var hasScannedRoom = false
     private(set) var roomStartPlaced = false
     private(set) var roomObstacleCount = 0
+    /// Uniform scale of the circuit root, including every kart and effect.
+    private(set) var courseScale: Float = 1
 
     var canStart: Bool { mode != .roomDrive || roomStartPlaced }
 
@@ -136,6 +140,7 @@ final class RaceGame {
         anchorRoot.components.remove(AnchoringComponent.self)
         anchorRoot.transform = .identity
         root.transform = .identity
+        root.scale = SIMD3(repeating: courseScale)
         anchorRoot.addChild(EntityFactory.makeFallbackGround())
         virtualCamera.components.set(PerspectiveCameraComponent())
         virtualCamera.look(at: .zero, from: [0, 1.9, 2.4], relativeTo: nil)
@@ -252,6 +257,25 @@ final class RaceGame {
     func rotateCourse() {
         guard phase == .ready, mode != .roomDrive else { return }
         root.orientation = simd_quatf(angle: .pi / 4, axis: [0, 1, 0]) * root.orientation
+    }
+
+    /// Resizes the whole circuit in local space, keeping gameplay proportions
+    /// identical while fitting anything from a tabletop to a large floor.
+    func setCourseScale(_ newScale: Float) {
+        guard phase == .ready, mode != .roomDrive else { return }
+        courseScale = max(
+            Self.minimumCourseScale,
+            min(Self.maximumCourseScale, newScale)
+        )
+        root.scale = SIMD3(repeating: courseScale)
+    }
+
+    func adjustCourseScale(by amount: Float) {
+        setCourseScale(courseScale + amount)
+    }
+
+    func resetCourseScale() {
+        setCourseScale(1)
     }
 
     // MARK: - Room free drive

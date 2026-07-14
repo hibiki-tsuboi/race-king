@@ -21,6 +21,7 @@ struct ContentView: View {
     @State private var isPreparingRoomScan = false
     @State private var isConfiguringSpatialTracking = false
     @State private var roomScanError: String?
+    @State private var courseScaleAtPinchStart: Float?
     @State private var updateSubscription: EventSubscription?
     @Environment(\.scenePhase) private var scenePhase
 
@@ -73,6 +74,7 @@ struct ContentView: View {
                         if game.mode != .roomDrive { moveCourseTowardAim() }
                     }
             )
+            .simultaneousGesture(courseScaleGesture)
             #endif
             .ignoresSafeArea()
 
@@ -217,6 +219,25 @@ struct ContentView: View {
     }
 
     #if !targetEnvironment(simulator)
+    private var courseScaleGesture: some Gesture {
+        MagnifyGesture(minimumScaleDelta: 0.01)
+            .onChanged { value in
+                guard game.phase == .ready, game.mode != .roomDrive,
+                      !game.virtualModeActive else {
+                    courseScaleAtPinchStart = nil
+                    return
+                }
+                if courseScaleAtPinchStart == nil {
+                    courseScaleAtPinchStart = game.courseScale
+                }
+                guard let initialScale = courseScaleAtPinchStart else { return }
+                game.setCourseScale(initialScale * Float(value.magnification))
+            }
+            .onEnded { _ in
+                courseScaleAtPinchStart = nil
+            }
+    }
+
     /// Casts the camera's aim onto either the circuit floor or scanned room.
     private func moveCourseTowardAim() {
         guard !game.virtualModeActive else { return }

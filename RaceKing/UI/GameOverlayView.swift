@@ -145,6 +145,8 @@ struct GameOverlayView: View {
                 if game.mode == .roomDrive {
                     roomDriveSetup
                 } else {
+                    courseScaleControls
+
                     Text("コーナー中にブレーキをタップでドリフト!\n長く滑るほどミニターボ")
                         .font(.caption.bold())
                         .multilineTextAlignment(.center)
@@ -179,7 +181,49 @@ struct GameOverlayView: View {
                 ? "床に向けてタップでスタート位置を決定"
                 : "まず部屋をスキャンしてください"
         }
-        return "床に向けてタップでコース移動\n長押しドラッグで追従"
+        return "タップ／長押しドラッグでコース移動\n二本指ピンチでサイズ調整"
+    }
+
+    private var courseScaleControls: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "arrow.up.left.and.arrow.down.right")
+
+            Button {
+                game.adjustCourseScale(by: -0.1)
+            } label: {
+                Image(systemName: "minus")
+                    .frame(width: 28, height: 28)
+                    .background(.white.opacity(0.14), in: Circle())
+            }
+            .disabled(game.courseScale <= RaceGame.minimumCourseScale)
+
+            Text("\(game.courseScale, format: .number.precision(.fractionLength(2)))×")
+                .monospacedDigit()
+                .frame(minWidth: 48)
+
+            Button {
+                game.adjustCourseScale(by: 0.1)
+            } label: {
+                Image(systemName: "plus")
+                    .frame(width: 28, height: 28)
+                    .background(.white.opacity(0.14), in: Circle())
+            }
+            .disabled(game.courseScale >= RaceGame.maximumCourseScale)
+
+            Button("1.0×") {
+                game.resetCourseScale()
+            }
+            .padding(.horizontal, 7)
+            .frame(height: 28)
+            .background(.white.opacity(0.14), in: Capsule())
+            .disabled(abs(game.courseScale - 1) < 0.005)
+        }
+        .font(.caption.bold())
+        .foregroundStyle(.white)
+        .buttonStyle(.plain)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(.black.opacity(0.45), in: Capsule())
     }
 
     @ViewBuilder
