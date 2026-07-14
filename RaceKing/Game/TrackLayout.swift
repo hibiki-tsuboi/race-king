@@ -15,7 +15,7 @@ struct TrackLayout {
     /// Corner radius of the centerline.
     var cornerRadius: Float = 0.3
     /// Width of the paved road.
-    var roadWidth: Float = 0.24
+    var roadWidth: Float = 0.30
     /// Number of ordered checkpoints the car must pass to complete a lap.
     var checkpointCount = 8
 
