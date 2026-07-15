@@ -128,6 +128,14 @@ struct TitleView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             .frame(width: proxy.size.width, height: proxy.size.height)
+            .overlay(alignment: .bottom) {
+                Text("VERSION \(appVersion)")
+                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    .tracking(1.2)
+                    .foregroundStyle(.white.opacity(0.38))
+                    .padding(.bottom, max(12, proxy.safeAreaInsets.bottom))
+                    .accessibilityLabel("バージョン \(appVersion)")
+            }
         }
         .onAppear {
             guard !reduceMotion else { return }
@@ -135,6 +143,10 @@ struct TitleView: View {
                 isStartHighlighted = true
             }
         }
+    }
+
+    private var appVersion: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—"
     }
 
     private var racingBackdrop: some View {

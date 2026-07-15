@@ -387,6 +387,8 @@ struct HUDView: View {
                             }
                             Button("すべて標準の車に戻す") { revertCarModels() }
                         }
+                        Divider()
+                        Text(appVersionText)
                     } label: {
                         Group {
                             if isImportingCar {
@@ -424,6 +426,15 @@ struct HUDView: View {
         case .roomDrive:
             return "FREE DRIVE"
         }
+    }
+
+    private var appVersionText: String {
+        let info = Bundle.main.infoDictionary
+        let version = info?["CFBundleShortVersionString"] as? String ?? "—"
+        guard let build = info?["CFBundleVersion"] as? String, !build.isEmpty else {
+            return "バージョン \(version)"
+        }
+        return "バージョン \(version)（\(build)）"
     }
 
     private var hasAnyCustomCar: Bool {
