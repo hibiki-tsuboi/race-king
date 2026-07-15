@@ -28,6 +28,7 @@ struct ContentView: View {
     @State private var showingRoomScan = false
     @State private var isPreparingRoomScan = false
     @State private var isConfiguringSpatialTracking = false
+    @State private var isSpatialTrackingSessionRunning = false
     @State private var spatialTrackingGeneration: UInt = 0
     @State private var spatialTrackingOperation: Task<Void, Never>?
     @State private var roomScanError: String?
@@ -101,13 +102,16 @@ struct ContentView: View {
             if screen == .game, scenePhase == .active {
                 refreshCameraAuthorization()
                 requestSpatialTracking()
-            } else if screen == .game {
-                if !showingRoomScan {
-                    requestSpatialTrackingStop()
-                    arSession.pause()
-                }
-                if scenePhase == .background, game.mode == .peerRace {
+            } else if scenePhase != .active {
+                if screen == .game, scenePhase == .background,
+                   game.mode == .peerRace {
                     multiplayer.disconnect()
+                }
+                if !showingRoomScan {
+                    arSession.pause()
+                    if scenePhase == .background {
+                        requestSpatialTrackingStop()
+                    }
                 }
             }
         }
@@ -225,8 +229,12 @@ struct ContentView: View {
             multiplayer.disconnect()
         }
         game.mode = mode
-        #if !targetEnvironment(simulator)
-        if game.virtualModeActive || mode == .roomDrive {
+        #if targetEnvironment(simulator)
+        game.resetFallbackCoursePlacement()
+        #else
+        if game.virtualModeActive {
+            game.resetFallbackCoursePlacement()
+        } else if mode == .roomDrive {
             game.removeCourseSurfaceAnchor()
         } else {
             game.installCourseSurfaceAnchor()
@@ -254,7 +262,7 @@ struct ContentView: View {
         leaveGame(for: .title)
     }
 
-    /// Stops every live game service before leaving gameplay.
+    /// Stops gameplay input and audio, then pauses the camera before leaving.
     private func leaveGame(for destination: AppScreen) {
         multiplayer.disconnect()
         tilt.stop()
@@ -268,7 +276,8 @@ struct ContentView: View {
         isPreparingRoomScan = false
         courseScaleAtPinchStart = nil
         courseRotationAtGestureStart = nil
-        requestSpatialTrackingStop()
+        // The RealityView and SpatialTrackingSession persist across the app's
+        // own screens. Keep their connection ready and only pause camera work.
         arSession.pause()
         withAnimation(.easeInOut(duration: 0.3)) {
             screen = destination
@@ -399,6 +408,7 @@ struct ContentView: View {
         isPreparingRoomScan = true
         enqueueSpatialTrackingOperation { generation in
             await spatialTrackingSession.stop()
+            isSpatialTrackingSessionRunning = false
             guard generation == spatialTrackingGeneration,
                   isPreparingRoomScan,
                   screen == .game,
@@ -432,6 +442,7 @@ struct ContentView: View {
               !showingRoomScan,
               !isPreparingRoomScan,
               !game.virtualModeActive,
+              !cameraAccessDenied,
               !isConfiguringSpatialTracking else { return }
         isConfiguringSpatialTracking = true
         enqueueSpatialTrackingOperation { generation in
@@ -440,14 +451,15 @@ struct ContentView: View {
         #endif
     }
 
-    /// Stops tracking in the same serial operation chain as startup. A newer
-    /// request invalidates the completion of this one before it can mutate AR.
+    /// Stops tracking in the same serial operation chain as startup. The stop
+    /// always completes; a newer start only suppresses the stale final pause.
     private func requestSpatialTrackingStop() {
         #if !targetEnvironment(simulator)
         isConfiguringSpatialTracking = false
         isPreparingRoomScan = false
-        enqueueSpatialTrackingOperation { generation in
+        enqueueSpatialTrackingOperation(skipIfSuperseded: false) { generation in
             await spatialTrackingSession.stop()
+            isSpatialTrackingSessionRunning = false
             guard generation == spatialTrackingGeneration else { return }
             arSession.pause()
         }
@@ -464,22 +476,30 @@ struct ContentView: View {
             }
         }
 
-        let spatialConfiguration = SpatialTrackingSession.Configuration(
-            tracking: [.camera, .world, .plane],
-            sceneUnderstanding: [.shadow, .occlusion],
-            camera: .back
-        )
         let arConfiguration = PeerCourseCoordinator.worldTrackingConfiguration()
-        let unavailable = await spatialTrackingSession.run(
-            spatialConfiguration,
-            session: arSession,
-            arConfiguration: arConfiguration
-        )
-        guard generation == spatialTrackingGeneration else { return }
-        if unavailable?.missingCameraAuthorization == true {
-            cameraAccessDenied = true
-            return
+        if !isSpatialTrackingSessionRunning {
+            let spatialConfiguration = SpatialTrackingSession.Configuration(
+                tracking: [.camera, .world, .plane],
+                sceneUnderstanding: [.shadow, .occlusion],
+                camera: .back
+            )
+            let unavailable = await spatialTrackingSession.run(
+                spatialConfiguration,
+                session: arSession,
+                arConfiguration: arConfiguration
+            )
+            if unavailable?.missingCameraAuthorization == true {
+                isSpatialTrackingSessionRunning = false
+                if generation == spatialTrackingGeneration {
+                    cameraAccessDenied = true
+                }
+                return
+            }
+            // Record completion before the generation check. If this start was
+            // superseded, its queued stop will run next and clear the state.
+            isSpatialTrackingSessionRunning = true
         }
+        guard generation == spatialTrackingGeneration else { return }
         guard screen == .game,
               scenePhase == .active,
               !showingRoomScan,
@@ -493,8 +513,10 @@ struct ContentView: View {
     }
 
     /// Serializes SpatialTrackingSession operations and gives each request a
-    /// generation token so stale async completions cannot restart tracking.
+    /// generation token so stale async starts cannot restart tracking. Stops
+    /// can opt into running even when superseded so a later start awaits them.
     private func enqueueSpatialTrackingOperation(
+        skipIfSuperseded: Bool = true,
         _ operation: @escaping @MainActor (UInt) async -> Void
     ) {
         spatialTrackingGeneration &+= 1
@@ -502,8 +524,10 @@ struct ContentView: View {
         let previousOperation = spatialTrackingOperation
         spatialTrackingOperation = Task { @MainActor in
             await previousOperation?.value
-            guard !Task.isCancelled,
-                  generation == spatialTrackingGeneration else { return }
+            guard !Task.isCancelled else { return }
+            if skipIfSuperseded, generation != spatialTrackingGeneration {
+                return
+            }
             await operation(generation)
         }
     }
@@ -513,6 +537,7 @@ struct ContentView: View {
         MagnifyGesture(minimumScaleDelta: 0.01)
             .onChanged { value in
                 guard game.phase == .ready, game.mode != .roomDrive,
+                      game.isCoursePlaced,
                       !game.virtualModeActive, canEditCoursePlacement else {
                     courseScaleAtPinchStart = nil
                     return
@@ -532,6 +557,7 @@ struct ContentView: View {
         RotateGesture(minimumAngleDelta: .degrees(0.5))
             .onChanged { value in
                 guard game.phase == .ready, game.mode != .roomDrive,
+                      game.isCoursePlaced,
                       !game.virtualModeActive, canEditCoursePlacement else {
                     courseRotationAtGestureStart = nil
                     return

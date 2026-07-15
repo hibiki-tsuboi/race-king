@@ -135,6 +135,10 @@ final class RaceGame {
     /// False while AR is still searching for a horizontal course surface;
     /// always true on platforms without a surface anchor (simulator, macOS).
     private(set) var isCourseAnchored = true
+    /// True only after the player has chosen a course position on the surface.
+    /// Kept separate from `isCourseAnchored` because a cached AR plane can
+    /// resolve immediately when switching modes.
+    private(set) var isCoursePlaced = true
     var mode: Mode = .timeAttack {
         didSet {
             guard phase == .ready, mode != oldValue else { return }
@@ -174,7 +178,9 @@ final class RaceGame {
     /// Latest completed-lap count for every remote Wi-Fi racer.
     private(set) var peerLapCounts: [UUID: Int] = [:]
 
-    var canStart: Bool { mode != .roomDrive || roomStartPlaced }
+    var canStart: Bool {
+        mode == .roomDrive ? roomStartPlaced : isCoursePlaced
+    }
 
     // MARK: - Settings (persisted)
 
@@ -239,11 +245,7 @@ final class RaceGame {
         guard !virtualModeActive else { return }
         if mode == .roomDrive { mode = .timeAttack }
         virtualModeActive = true
-        anchorRoot.components.remove(AnchoringComponent.self)
-        anchorRoot.transform = .identity
-        root.transform = .identity
-        root.scale = SIMD3(repeating: courseScale)
-        root.orientation = simd_quatf(angle: courseRotation, axis: [0, 1, 0])
+        resetFallbackCoursePlacement()
         anchorRoot.addChild(EntityFactory.makeFallbackGround())
         virtualCamera.components.set(PerspectiveCameraComponent())
         virtualCamera.look(at: .zero, from: [0, 1.9, 2.4], relativeTo: nil)
@@ -351,13 +353,38 @@ final class RaceGame {
         .plane(.horizontal, classification: .any, minimumBounds: [0.3, 0.3])
     }
 
+    /// Restores the fixed-camera course to its default pose. Simulator and
+    /// virtual play have no AR placement gesture, so they start ready to race.
+    func resetFallbackCoursePlacement() {
+        anchorRoot.components.remove(AnchoringComponent.self)
+        anchorRoot.transform = .identity
+        root.position = .zero
+        root.orientation = simd_quatf(angle: 0, axis: [0, 1, 0])
+        root.scale = SIMD3(repeating: 1)
+        root.isEnabled = true
+        courseRotation = 0
+        courseScale = 1
+        isCourseAnchored = true
+        isCoursePlaced = true
+        floorSearchTime = 0
+        canOfferVirtualMode = false
+    }
+
     /// Anchors the scene to the first usable course surface found by AR.
     func installCourseSurfaceAnchor() {
         // Detach the previously resolved surface before looking for a new one.
         anchorRoot.components.remove(AnchoringComponent.self)
         anchorRoot.transform = .identity
         root.position = .zero
+        root.orientation = simd_quatf(angle: 0, axis: [0, 1, 0])
+        root.scale = SIMD3(repeating: 1)
+        root.isEnabled = false
+        courseRotation = 0
+        courseScale = 1
         isCourseAnchored = false
+        isCoursePlaced = false
+        floorSearchTime = 0
+        canOfferVirtualMode = false
         anchorRoot.components.set(AnchoringComponent(Self.courseSurfaceAnchorTarget))
     }
 
@@ -369,7 +396,8 @@ final class RaceGame {
 
     /// Captures the course root in AR world coordinates for a nearby guest.
     func sharedCoursePlacement() -> PeerRacePacket.CoursePlacement? {
-        guard phase == .ready, mode == .peerRace, isCourseAnchored else { return nil }
+        guard phase == .ready, mode == .peerRace,
+              isCourseAnchored, isCoursePlaced else { return nil }
 
         let matrix = root.transformMatrix(relativeTo: nil)
         let xAxis = SIMD3(matrix.columns.0.x, matrix.columns.0.y, matrix.columns.0.z)
@@ -411,23 +439,17 @@ final class RaceGame {
     }
 
     func cancelSharedCoursePreparation() {
-        root.isEnabled = true
+        root.isEnabled = isCoursePlaced
     }
 
     /// Returns a guest to an independently tracked surface after leaving a shared world.
     func restoreLocalCoursePlacement() {
         guard !virtualModeActive else {
+            isCoursePlaced = true
             root.isEnabled = true
             return
         }
-        anchorRoot.transform = .identity
-        anchorRoot.components.set(AnchoringComponent(Self.courseSurfaceAnchorTarget))
-        root.position = .zero
-        root.orientation = simd_quatf(angle: 0, axis: [0, 1, 0])
-        root.scale = SIMD3(repeating: courseScale)
-        courseRotation = 0
-        isCourseAnchored = false
-        root.isEnabled = true
+        installCourseSurfaceAnchor()
     }
 
     /// Places the course at the host's pose after both sessions share a world origin.
@@ -473,6 +495,7 @@ final class RaceGame {
         courseScale = placement.scale
         courseRotation = 0
         root.scale = SIMD3(repeating: placement.scale)
+        isCoursePlaced = true
         root.isEnabled = true
         return true
     }
@@ -489,12 +512,14 @@ final class RaceGame {
     func moveCourse(toWorldPoint point: SIMD3<Float>) {
         guard phase == .ready, mode != .roomDrive, isCourseAnchored else { return }
         moveCourse(to: anchorRoot.convert(position: point, from: nil))
+        isCoursePlaced = true
+        root.isEnabled = true
     }
 
     /// Rotates the circuit and every child around its center without changing
     /// the real-world surface where it was placed.
     func setCourseRotation(_ angle: Float) {
-        guard phase == .ready, mode != .roomDrive else { return }
+        guard phase == .ready, mode != .roomDrive, isCoursePlaced else { return }
         courseRotation = atan2(sin(angle), cos(angle))
         root.orientation = simd_quatf(angle: courseRotation, axis: [0, 1, 0])
     }
@@ -502,7 +527,7 @@ final class RaceGame {
     /// Resizes the whole circuit in local space, keeping gameplay proportions
     /// identical while fitting anything from a tabletop to a large floor.
     func setCourseScale(_ newScale: Float) {
-        guard phase == .ready, mode != .roomDrive else { return }
+        guard phase == .ready, mode != .roomDrive, isCoursePlaced else { return }
         courseScale = max(
             Self.minimumCourseScale,
             min(Self.maximumCourseScale, newScale)
@@ -1193,13 +1218,13 @@ final class RaceGame {
 
         switch mode {
         case .timeAttack:
-            root.isEnabled = true
+            root.isEnabled = isCoursePlaced
             roomRoot.isEnabled = false
             movePlayer(to: root)
             car.isEnabled = true
             placePlayer(back: 0.06, lateral: 0)
         case .race:
-            root.isEnabled = true
+            root.isEnabled = isCoursePlaced
             roomRoot.isEnabled = false
             movePlayer(to: root)
             car.isEnabled = true
@@ -1210,7 +1235,7 @@ final class RaceGame {
             let slot = Self.raceGridSlots[4]
             placePlayer(back: slot.back, lateral: slot.lateral)
         case .peerRace:
-            root.isEnabled = true
+            root.isEnabled = isCoursePlaced
             roomRoot.isEnabled = false
             movePlayer(to: root)
             car.isEnabled = true

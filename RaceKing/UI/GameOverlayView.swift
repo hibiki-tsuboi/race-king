@@ -282,10 +282,16 @@ struct GameOverlayView: View {
             if multiplayer.role == .guest {
                 return "ホストと同じ机・床を映してコースを位置合わせ"
             }
+            if !game.isCoursePlaced {
+                return "床やテーブルをタップしてコースを配置"
+            }
             if multiplayer.isCourseSynchronized {
                 return "共有したコースで最大5台同時にレースします"
             }
             return "ホスト側でコースを配置してから共有"
+        }
+        if !game.isCoursePlaced {
+            return "床やテーブルをタップしてコースを配置"
         }
         return "床やテーブルをタップしてコース移動\nドラッグで移動・二本指でサイズ／向き調整"
     }
