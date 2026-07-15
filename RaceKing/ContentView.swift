@@ -28,7 +28,6 @@ struct ContentView: View {
     @State private var showingRoomScan = false
     @State private var isPreparingRoomScan = false
     @State private var isConfiguringSpatialTracking = false
-    @State private var isStoppingSpatialTracking = false
     @State private var roomScanError: String?
     @State private var courseScaleAtPinchStart: Float?
     @State private var courseRotationAtGestureStart: Float?
@@ -39,85 +38,13 @@ struct ContentView: View {
 
     var body: some View {
         ZStack {
+            persistentRealityView
+                .opacity(screen == .game ? 1 : 0)
+                .allowsHitTesting(screen == .game)
+                .accessibilityHidden(screen != .game)
+
             switch screen {
             case .game:
-                RealityView { content in
-                    #if targetEnvironment(simulator)
-                    // No AR passthrough here: fake a floor and look down at the circuit.
-                    content.add(EntityFactory.makeFallbackGround())
-                    let camera = Entity(components: PerspectiveCameraComponent())
-                    camera.look(at: .zero, from: [0, 1.9, 2.4], relativeTo: nil)
-                    content.add(camera)
-                    #else
-                    if game.virtualModeActive {
-                        content.camera = .virtual
-                        game.removeCourseSurfaceAnchor()
-                    } else {
-                        // AR starts only after the player chooses a mode.
-                        content.camera = .spatialTracking
-                        if game.mode == .roomDrive {
-                            game.removeCourseSurfaceAnchor()
-                        } else {
-                            game.installCourseSurfaceAnchor()
-                        }
-                        // Camera pose feed for aim-based course placement.
-                        game.cameraRig.components.set(AnchoringComponent(.camera))
-                        content.add(game.cameraRig)
-                    }
-                    #endif
-
-                    content.add(game.anchorRoot)
-                    content.add(game.roomRoot)
-                    updateSubscription = content.subscribe(to: SceneEvents.Update.self) { event in
-                        game.update(deltaTime: event.deltaTime)
-                        if game.mode == .peerRace {
-                            multiplayer.sendCarState(
-                                game.peerCarState(), deltaTime: event.deltaTime
-                            )
-                            peerCourse.updateRelocalization(
-                                deltaTime: event.deltaTime
-                            )
-                        }
-                        audio.setEngine(
-                            speedRatio: game.speedRatio,
-                            running: game.isEngineRunning,
-                            drifting: game.isDrifting
-                        )
-                    }
-                } update: { content in
-                    #if !targetEnvironment(simulator)
-                    // One-way switch to the non-AR presentation.
-                    if game.virtualModeActive {
-                        content.camera = .virtual
-                    }
-                    #endif
-                }
-                #if targetEnvironment(simulator)
-                .realityViewCameraControls(.orbit)
-                #else
-                .realityViewCameraControls(game.virtualModeActive ? .orbit : .none)
-                // AR: use the actual touch location rather than the camera center.
-                .onTapGesture(coordinateSpace: .local) { location in
-                    placeCourse(at: location)
-                }
-                .simultaneousGesture(
-                    DragGesture(minimumDistance: 15)
-                        .onChanged { value in
-                            if game.mode != .roomDrive,
-                               courseScaleAtPinchStart == nil,
-                               courseRotationAtGestureStart == nil {
-                                placeCourse(at: value.location)
-                            }
-                        }
-                )
-                .simultaneousGesture(courseScaleGesture)
-                .simultaneousGesture(courseRotationGesture)
-                #endif
-                .onGeometryChange(for: CGSize.self, of: { $0.size }) {
-                    realityViewSize = $0
-                }
-                .ignoresSafeArea()
-
                 GameOverlayView(
                     game: game,
                     multiplayer: multiplayer,
@@ -136,7 +63,6 @@ struct ContentView: View {
                     roomDriveAvailable: roomPlanSupported
                         && !game.virtualModeActive
                         && !cameraAccessDenied,
-                    isPreparing: isStoppingSpatialTracking,
                     onSelect: enterGame,
                     onBack: returnToTitle
                 )
@@ -203,6 +129,75 @@ struct ContentView: View {
         }
     }
 
+    /// Keeps one RealityView and one RealityKit scene alive across title and
+    /// mode screens so retained entities never move between scene instances.
+    private var persistentRealityView: some View {
+        RealityView { content in
+            #if targetEnvironment(simulator)
+            // No AR passthrough here: fake a floor and look down at the circuit.
+            content.add(EntityFactory.makeFallbackGround())
+            let camera = Entity(components: PerspectiveCameraComponent())
+            camera.look(at: .zero, from: [0, 1.9, 2.4], relativeTo: nil)
+            content.add(camera)
+            #else
+            content.camera = screen == .game && !game.virtualModeActive
+                ? .spatialTracking
+                : .virtual
+            game.cameraRig.components.set(AnchoringComponent(.camera))
+            content.add(game.cameraRig)
+            #endif
+
+            content.add(game.anchorRoot)
+            content.add(game.roomRoot)
+            updateSubscription = content.subscribe(to: SceneEvents.Update.self) { event in
+                guard screen == .game else { return }
+                game.update(deltaTime: event.deltaTime)
+                if game.mode == .peerRace {
+                    multiplayer.sendCarState(
+                        game.peerCarState(), deltaTime: event.deltaTime
+                    )
+                    peerCourse.updateRelocalization(deltaTime: event.deltaTime)
+                }
+                audio.setEngine(
+                    speedRatio: game.speedRatio,
+                    running: game.isEngineRunning,
+                    drifting: game.isDrifting
+                )
+            }
+        } update: { content in
+            #if !targetEnvironment(simulator)
+            content.camera = screen == .game && !game.virtualModeActive
+                ? .spatialTracking
+                : .virtual
+            #endif
+        }
+        #if targetEnvironment(simulator)
+        .realityViewCameraControls(.orbit)
+        #else
+        .realityViewCameraControls(game.virtualModeActive ? .orbit : .none)
+        // AR: use the actual touch location rather than the camera center.
+        .onTapGesture(coordinateSpace: .local) { location in
+            placeCourse(at: location)
+        }
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 15)
+                .onChanged { value in
+                    if game.mode != .roomDrive,
+                       courseScaleAtPinchStart == nil,
+                       courseRotationAtGestureStart == nil {
+                        placeCourse(at: value.location)
+                    }
+                }
+        )
+        .simultaneousGesture(courseScaleGesture)
+        .simultaneousGesture(courseRotationGesture)
+        #endif
+        .onGeometryChange(for: CGSize.self, of: { $0.size }) {
+            realityViewSize = $0
+        }
+        .ignoresSafeArea()
+    }
+
     private func showModeSelection() {
         refreshCameraAuthorization()
         withAnimation(.easeInOut(duration: 0.3)) {
@@ -211,7 +206,6 @@ struct ContentView: View {
     }
 
     private func enterGame(_ mode: RaceGame.Mode) {
-        guard !isStoppingSpatialTracking else { return }
         if game.phase != .ready {
             game.reset()
         }
@@ -219,6 +213,13 @@ struct ContentView: View {
             multiplayer.disconnect()
         }
         game.mode = mode
+        #if !targetEnvironment(simulator)
+        if game.virtualModeActive || mode == .roomDrive {
+            game.removeCourseSurfaceAnchor()
+        } else {
+            game.installCourseSurfaceAnchor()
+        }
+        #endif
         withAnimation(.easeInOut(duration: 0.35)) {
             screen = .game
         }
@@ -241,10 +242,9 @@ struct ContentView: View {
         leaveGame(for: .title)
     }
 
-    /// Stops every live game service before leaving the RealityView.
+    /// Stops every live game service before leaving gameplay.
     private func leaveGame(for destination: AppScreen) {
         multiplayer.disconnect()
-        updateSubscription = nil
         tilt.stop()
         game.steeringInput = 0
         game.throttleInput = false
@@ -257,13 +257,8 @@ struct ContentView: View {
         courseScaleAtPinchStart = nil
         courseRotationAtGestureStart = nil
         arSession.pause()
-        isStoppingSpatialTracking = true
         withAnimation(.easeInOut(duration: 0.3)) {
             screen = destination
-        }
-        Task {
-            await spatialTrackingSession.stop()
-            isStoppingSpatialTracking = false
         }
     }
 

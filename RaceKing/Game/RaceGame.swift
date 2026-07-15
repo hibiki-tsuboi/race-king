@@ -353,8 +353,7 @@ final class RaceGame {
 
     /// Anchors the scene to the first usable course surface found by AR.
     func installCourseSurfaceAnchor() {
-        // A mode change recreates RealityView and its spatial-tracking session.
-        // Detach the previous session's anchor before looking for a new plane.
+        // Detach the previously resolved surface before looking for a new one.
         anchorRoot.components.remove(AnchoringComponent.self)
         anchorRoot.transform = .identity
         root.position = .zero
