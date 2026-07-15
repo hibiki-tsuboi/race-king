@@ -12,6 +12,7 @@ enum RaceCarChoice: String, CaseIterable, Codable, Identifiable, Sendable {
     case red
     case blue
     case white
+    case yellow
 
     var id: Self { self }
 
@@ -21,6 +22,7 @@ enum RaceCarChoice: String, CaseIterable, Codable, Identifiable, Sendable {
         case .red: "赤"
         case .blue: "青"
         case .white: "白"
+        case .yellow: "黄"
         }
     }
 
@@ -30,6 +32,7 @@ enum RaceCarChoice: String, CaseIterable, Codable, Identifiable, Sendable {
         case .red: "AICar1"
         case .blue: "AICar2"
         case .white: "AICar3"
+        case .yellow: "AICar4"
         }
     }
 }

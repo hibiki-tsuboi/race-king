@@ -506,7 +506,7 @@ struct HUDView: View {
                             Label("自分の車を読み込む…", systemImage: "square.and.arrow.down")
                         }
                         Menu {
-                            ForEach(0..<3, id: \.self) { index in
+                            ForEach(EntityFactory.aiCarTemplates.indices, id: \.self) { index in
                                 Button("AI \(index + 1)…") {
                                     importSlot = .ai(index)
                                     showingCarImporter = true

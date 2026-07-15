@@ -96,7 +96,7 @@ struct ModeSelectionView: View {
                 id: "cpuRace",
                 mode: .race,
                 title: "CPU対戦",
-                detail: "3台のライバルと順位を競う",
+                detail: "4台のライバルと5台で順位を競う",
                 systemImage: "person.3.fill",
                 color: .red
             ),

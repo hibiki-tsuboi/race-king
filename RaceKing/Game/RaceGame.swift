@@ -1084,12 +1084,15 @@ final class RaceGame {
             movePlayer(to: root)
             car.isEnabled = true
             let slots: [(back: Float, lateral: Float)] =
-                [(0.08, -0.037), (0.08, 0.037), (0.17, -0.037)]
+                [
+                    (0.08, -0.037), (0.08, 0.037),
+                    (0.17, -0.037), (0.17, 0.037),
+                ]
             for (driver, slot) in zip(aiDrivers, slots) {
                 driver.place(back: slot.back, lateral: slot.lateral, layout: layout)
                 root.addChild(driver.entity)
             }
-            placePlayer(back: 0.17, lateral: 0.037)
+            placePlayer(back: 0.26, lateral: 0)
         case .peerRace:
             root.isEnabled = true
             roomRoot.isEnabled = false

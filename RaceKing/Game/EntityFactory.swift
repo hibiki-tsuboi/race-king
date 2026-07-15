@@ -13,6 +13,8 @@ import AppKit
 
 /// Builds the visual entities for the game. All models face +Z as "forward".
 enum EntityFactory {
+    static let aiCarCount = 4
+
     /// A circuit made of flat road segments, alternating red/white curbs,
     /// and a checkered start/finish line.
     static func makeTrack(layout: TrackLayout) -> Entity {
@@ -99,7 +101,7 @@ enum EntityFactory {
         supportDirectory.appending(path: "PlayerCar.usdz")
     }
 
-    /// Imported model for one of the three AI karts (slots 0-2).
+    /// Imported model for one of the four AI karts (slots 0-3).
     static func importedAICarURL(index: Int) -> URL {
         supportDirectory.appending(path: "AICar\(index + 1).usdz")
     }
@@ -111,19 +113,19 @@ enum EntityFactory {
         return try? Entity.load(named: "PlayerCar")
     }()
 
-    /// A bundled default model for one AI kart (`AICar1-3.usdz`).
+    /// A bundled default model for one AI kart (`AICar1-4.usdz`).
     static func bundledAICarTemplate(index: Int) -> Entity? {
         try? Entity.load(named: "AICar\(index + 1)")
     }
 
-    /// Loads one of the four built-in cars shared by every nearby-race client.
+    /// Loads one of the five built-in cars shared by every nearby-race client.
     static func bundledRaceCarTemplate(for choice: RaceCarChoice) -> Entity? {
         try? Entity.load(named: choice.resourceName)
     }
 
     /// Models for the AI karts: an imported file wins over the bundled
     /// default; nil slots fall back to the tinted procedural kart.
-    static var aiCarTemplates: [Entity?] = (0..<3).map { index in
+    static var aiCarTemplates: [Entity?] = (0..<aiCarCount).map { index in
         if let imported = try? Entity.load(contentsOf: importedAICarURL(index: index)) {
             return imported
         }
@@ -158,6 +160,8 @@ enum EntityFactory {
             .init(red: 0.2, green: 0.45, blue: 0.95, alpha: 1)
         case .white:
             .init(white: 0.9, alpha: 1)
+        case .yellow:
+            .init(red: 0.95, green: 0.72, blue: 0.08, alpha: 1)
         }
         populate(
             car,

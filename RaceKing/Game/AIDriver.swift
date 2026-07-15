@@ -49,9 +49,10 @@ final class AIDriver {
 
     static func defaultOpponents() -> [AIDriver] {
         [
-            AIDriver(index: 0, bodyColor: .init(red: 0.2, green: 0.4, blue: 0.95, alpha: 1), topSpeed: 0.63),
-            AIDriver(index: 1, bodyColor: .init(red: 0.15, green: 0.7, blue: 0.3, alpha: 1), topSpeed: 0.60),
-            AIDriver(index: 2, bodyColor: .init(red: 0.95, green: 0.65, blue: 0.1, alpha: 1), topSpeed: 0.575),
+            AIDriver(index: 0, bodyColor: .init(red: 0.9, green: 0.12, blue: 0.15, alpha: 1), topSpeed: 0.63),
+            AIDriver(index: 1, bodyColor: .init(red: 0.2, green: 0.45, blue: 0.95, alpha: 1), topSpeed: 0.60),
+            AIDriver(index: 2, bodyColor: .init(white: 0.9, alpha: 1), topSpeed: 0.575),
+            AIDriver(index: 3, bodyColor: .init(red: 0.95, green: 0.72, blue: 0.08, alpha: 1), topSpeed: 0.55),
         ]
     }
 

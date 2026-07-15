@@ -77,6 +77,7 @@ struct PeerRaceLobbyView: View {
         case .red: .red
         case .blue: .blue
         case .white: .white
+        case .yellow: .yellow
         case nil: .white.opacity(0.65)
         }
     }

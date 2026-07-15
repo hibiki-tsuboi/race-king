@@ -60,7 +60,7 @@ struct PeerRacePacket: Codable, Sendable {
     var raceTime: TimeInterval?
     var position: Int?
 
-    static let currentVersion = 3
+    static let currentVersion = 4
 
     static func hello(name: String, carChoice: RaceCarChoice) -> Self {
         Self(
