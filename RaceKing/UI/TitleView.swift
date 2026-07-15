@@ -15,7 +15,7 @@ struct TitleView: View {
     var body: some View {
         GeometryReader { proxy in
             let width = proxy.size.width
-            let buttonWidth = min(width - 56, 360)
+            let buttonWidth = min(width - 24, 410)
 
             ZStack {
                 Image("TitleBackground")
@@ -30,30 +30,15 @@ struct TitleView: View {
                     Spacer()
 
                     Button(action: onStart) {
-                        HStack(spacing: 12) {
-                            Image(systemName: "play.fill")
-                            Text("PRESS START")
-                        }
-                        .font(.system(size: 24, weight: .black, design: .rounded))
-                        .foregroundStyle(.white)
-                        .frame(width: buttonWidth)
-                        .padding(.vertical, 17)
-                        .background(
-                            LinearGradient(
-                                colors: [.red, .orange],
-                                startPoint: .leading,
-                                endPoint: .trailing
-                            ),
-                            in: Capsule()
-                        )
-                        .overlay(
-                            Capsule()
-                                .strokeBorder(.white.opacity(0.7), lineWidth: 2)
-                        )
-                        .shadow(color: .red.opacity(0.55), radius: 20, y: 8)
-                        .scaleEffect(isStartHighlighted ? 1.025 : 1)
+                        Image("PressStart")
+                            .resizable()
+                            .scaledToFill()
+                            .frame(width: buttonWidth, height: buttonWidth * 0.26)
+                            .clipped()
+                            .scaleEffect(isStartHighlighted ? 1.025 : 1)
                     }
                     .buttonStyle(.plain)
+                    .contentShape(Capsule())
                     .accessibilityLabel("遊ぶモードを選択")
                     .padding(.bottom, max(104, proxy.size.height * 0.16))
                 }
