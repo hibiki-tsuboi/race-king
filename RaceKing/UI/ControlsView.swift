@@ -7,6 +7,9 @@ import SwiftUI
 
 /// Touch controls: steering on the left, brake and accelerator on the right.
 struct ControlsView: View {
+    /// Leaves enough steering range for corners without making short taps too sharp.
+    private static let touchSteeringStrength: Float = 0.75
+
     var game: RaceGame
     @State private var steerLeft = false
     @State private var steerRight = false
@@ -40,7 +43,8 @@ struct ControlsView: View {
     }
 
     private func updateSteering() {
-        game.steeringInput = (steerRight ? 1 : 0) - (steerLeft ? 1 : 0)
+        let direction = Float((steerRight ? 1 : 0) - (steerLeft ? 1 : 0))
+        game.steeringInput = direction * Self.touchSteeringStrength
     }
 
     private var throttle: Binding<Bool> {

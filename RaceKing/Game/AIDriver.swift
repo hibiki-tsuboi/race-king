@@ -15,6 +15,10 @@ import AppKit
 /// A computer-controlled kart that chases a lookahead point on the centerline
 /// (pure pursuit). Each opponent has a different top speed for variety.
 final class AIDriver {
+    private static let curvatureSampleDistance: Float = 0.03
+    private static let minimumCornerPreviewDistance: Float = 0.18
+    private static let cornerSpeedSafetyFactor: Float = 0.96
+
     let entity: Entity
     let topSpeed: Float
     /// Tint of the procedural kart, kept for reverting a custom model.
@@ -81,8 +85,11 @@ final class AIDriver {
         let steering = max(-1, min(1, 4 * cross / max(0.001, simd_length(to))))
 
         let offRoad = layout.distanceFromCenterline(p) > layout.roadWidth / 2 + 0.015
+        let targetSpeed = targetSpeed(at: s, layout: layout)
+        let brake = physics.speed > targetSpeed + 0.015
+        let throttle = !brake && physics.speed < targetSpeed + 0.005
         let movement = physics.step(
-            dt: dt, steeringInput: steering, throttle: true, brake: false,
+            dt: dt, steeringInput: steering, throttle: throttle, brake: brake,
             offRoad: offRoad, topSpeed: topSpeed
         )
         entity.position += movement
@@ -101,6 +108,40 @@ final class AIDriver {
         } else {
             touchingWall = false
         }
+    }
+
+    /// Looks far enough ahead to brake before the tightest upcoming curve.
+    private func targetSpeed(at s: Float, layout: TrackLayout) -> Float {
+        let previewDistance = max(
+            Self.minimumCornerPreviewDistance,
+            min(0.26, abs(physics.speed) * 0.35)
+        )
+        let sampleCount = max(
+            1,
+            Int(ceil(previewDistance / Self.curvatureSampleDistance))
+        )
+        let sampleDistance = previewDistance / Float(sampleCount)
+        var previousTangent = layout.sample(at: s).tangent
+        var maximumCurvature: Float = 0
+
+        for sample in 1...sampleCount {
+            let distance = Float(sample) * sampleDistance
+            let tangent = layout.sample(at: s + distance).tangent
+            let alignment = max(-1, min(1, simd_dot(previousTangent, tangent)))
+            maximumCurvature = max(
+                maximumCurvature,
+                acos(alignment) / sampleDistance
+            )
+            previousTangent = tangent
+        }
+
+        guard maximumCurvature > 0.05 else { return topSpeed }
+        let radius = 1 / maximumCurvature
+        let cornerSpeed = CarPhysics.maximumCorneringSpeed(
+            radius: radius,
+            underPower: true
+        ) * Self.cornerSpeedSafetyFactor
+        return min(topSpeed, cornerSpeed)
     }
 
     /// Returns true when the kart just completed a lap.

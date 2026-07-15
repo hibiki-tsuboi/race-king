@@ -16,6 +16,13 @@ struct CarPhysics {
     static let rollingDrag: Float = 0.35
     static let offRoadDrag: Float = 2.2
     static let driftDrag: Float = 0.35
+    /// Model-space lateral acceleration available before the tires push wide.
+    static let maximumLateralAcceleration: Float = 0.75
+    /// Acceleration shifts grip away from turning, but keeps the effect forgiving.
+    private static let poweredLateralGripMultiplier: Float = 0.88
+    private static let brakingLateralGripMultiplier: Float = 0.92
+    private static let tireScrubDrag: Float = 0.45
+    private static let maximumUndersteerSlip: Float = 0.16
     /// Below this speed a drift cannot start (or survive).
     static let driftMinSpeed: Float = 0.3
     /// Seconds of drifting to charge mini-turbo level 1 (blue) and 2 (orange).
@@ -26,6 +33,7 @@ struct CarPhysics {
     var speed: Float = 0
     var heading: Float = 0
     private var steering: Float = 0
+    private var understeerSlip: Float = 0
 
     // MARK: - Drift state
 
@@ -47,6 +55,13 @@ struct CarPhysics {
 
     var forward: SIMD3<Float> { [sin(heading), 0, cos(heading)] }
 
+    /// Fastest steady speed that can hold a turn of `radius` without sliding.
+    static func maximumCorneringSpeed(radius: Float, underPower: Bool) -> Float {
+        let grip = maximumLateralAcceleration
+            * (underPower ? poweredLateralGripMultiplier : 1)
+        return sqrt(max(0, grip * radius))
+    }
+
     mutating func reset(heading newHeading: Float) {
         speed = 0
         steering = 0
@@ -55,6 +70,7 @@ struct CarPhysics {
         driftDirection = 0
         driftCharge = 0
         slip = 0
+        understeerSlip = 0
         boostTimer = 0
     }
 
@@ -83,8 +99,12 @@ struct CarPhysics {
         dt: Float, steeringInput: Float, throttle: Bool, brake: Bool,
         offRoad: Bool, topSpeed: Float = CarPhysics.maxSpeed
     ) -> SIMD3<Float> {
-        // Ease the wheel toward the input so steering isn't twitchy.
-        steering += (steeringInput - steering) * min(1, dt * 10)
+        // High-speed turn-in is deliberate while releasing the control recenters
+        // quickly, so a short digital tap adjusts the line instead of snapping it.
+        let steeringSpeedRatio = min(1, abs(speed) / Self.maxSpeed)
+        let isRecentering = abs(steeringInput) < abs(steering)
+        let steeringResponse = isRecentering ? 16 : 10 - 4 * steeringSpeedRatio
+        steering += (steeringInput - steering) * min(1, dt * steeringResponse)
 
         var effectiveTop = topSpeed
         if boostTimer > 0 {
@@ -126,19 +146,40 @@ struct CarPhysics {
             heading -= driftDirection
                 * (3.8 * grip * (0.45 + 0.55 * inward) * dt + (newSlip - slip))
             slip = newSlip
+            understeerSlip += (0 - understeerSlip) * min(1, dt * 8)
         } else {
-            // Yaw comes from rolling: it grows with speed, fades to zero at
-            // a standstill (a parked car can't pivot), and flips in reverse
-            // like a real car backing up.
+            // The wheel requests a yaw rate, but finite lateral tire grip caps
+            // it at speed. Excess steering becomes understeer instead of making
+            // the car rotate ever more sharply.
             let rolling = min(1, abs(speed) / 0.1)
             let grip = (0.25 + 0.75 * ratio) * rolling * (speed < 0 ? -1 : 1)
-            heading -= steering * 2.8 * grip * dt
+            let requestedYawRate = steering * 2.8 * grip
+            var lateralLimit = Self.maximumLateralAcceleration
+            if throttle { lateralLimit *= Self.poweredLateralGripMultiplier }
+            if brake { lateralLimit *= Self.brakingLateralGripMultiplier }
+
+            let maximumYawRate = lateralLimit / max(0.001, abs(speed))
+            let yawRate = max(-maximumYawRate, min(maximumYawRate, requestedYawRate))
+            heading -= yawRate * dt
+
+            let requestedLateralAcceleration = abs(speed * requestedYawRate)
+            let overload = max(0, requestedLateralAcceleration / lateralLimit - 1)
+            let slipTarget = min(
+                Self.maximumUndersteerSlip,
+                overload * 0.12
+            ) * (steering >= 0 ? 1 : -1)
+            understeerSlip += (slipTarget - understeerSlip) * min(1, dt * 6)
+
+            // Sliding tires scrub speed, but not enough to auto-brake a badly
+            // overdriven corner back onto the racing line.
+            let scrubDrag = Self.tireScrubDrag * min(1, overload)
+            speed -= scrubDrag * speed * dt
             // Grip catches again: the travel direction converges onto the nose.
             slip += (0 - slip) * min(1, dt * 4)
         }
 
-        // While sliding, the car travels wider than its nose points.
-        let travelHeading = heading + driftDirection * slip
+        // Drift and understeer both make the car travel wider than its nose.
+        let travelHeading = heading + driftDirection * slip + understeerSlip
         return SIMD3(sin(travelHeading), 0, cos(travelHeading)) * speed * dt
     }
 
@@ -165,6 +206,7 @@ struct CarPhysics {
             speed *= -0.08 * rebound
         }
         slip *= max(0, 1 - impact)
+        understeerSlip *= max(0, 1 - impact)
         return impact
     }
 }
