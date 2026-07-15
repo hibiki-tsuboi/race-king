@@ -28,6 +28,8 @@ struct ContentView: View {
     @State private var showingRoomScan = false
     @State private var isPreparingRoomScan = false
     @State private var isConfiguringSpatialTracking = false
+    @State private var spatialTrackingGeneration: UInt = 0
+    @State private var spatialTrackingOperation: Task<Void, Never>?
     @State private var roomScanError: String?
     @State private var courseScaleAtPinchStart: Float?
     @State private var courseRotationAtGestureStart: Float?
@@ -90,20 +92,30 @@ struct ContentView: View {
                 multiplayer.disconnect()
             }
         }
+        .onChange(of: game.virtualModeActive) {
+            guard game.virtualModeActive else { return }
+            requestSpatialTrackingStop()
+            arSession.pause()
+        }
         .onChange(of: scenePhase) {
             if screen == .game, scenePhase == .active {
                 refreshCameraAuthorization()
-                Task { await runSpatialTracking() }
-            } else if screen == .game, scenePhase == .background,
-                      game.mode == .peerRace {
-                multiplayer.disconnect()
+                requestSpatialTracking()
+            } else if screen == .game {
+                if !showingRoomScan {
+                    requestSpatialTrackingStop()
+                    arSession.pause()
+                }
+                if scenePhase == .background, game.mode == .peerRace {
+                    multiplayer.disconnect()
+                }
             }
         }
         .fullScreenCover(
             isPresented: $showingRoomScan,
             onDismiss: {
                 guard screen == .game else { return }
-                Task { await runSpatialTracking() }
+                requestSpatialTracking()
             }
         ) {
             RoomScanView(
@@ -225,7 +237,7 @@ struct ContentView: View {
         }
         updateTiltSteering()
         refreshCameraAuthorization()
-        Task { await runSpatialTracking() }
+        requestSpatialTracking()
     }
 
     private func returnToModeSelection() {
@@ -256,6 +268,7 @@ struct ContentView: View {
         isPreparingRoomScan = false
         courseScaleAtPinchStart = nil
         courseRotationAtGestureStart = nil
+        requestSpatialTrackingStop()
         arSession.pause()
         withAnimation(.easeInOut(duration: 0.3)) {
             screen = destination
@@ -361,6 +374,7 @@ struct ContentView: View {
             && !game.virtualModeActive
             && !cameraAccessDenied
             && !isPreparingRoomScan
+            && !isConfiguringSpatialTracking
     }
 
     private func refreshCameraAuthorization() {
@@ -379,12 +393,20 @@ struct ContentView: View {
             roomScanError = "部屋のスキャンはARなしモードでは利用できません。アプリを再起動してARを有効にしてください。"
             return
         }
-        guard !cameraAccessDenied, !isPreparingRoomScan else { return }
+        guard !cameraAccessDenied, !isPreparingRoomScan,
+              !isConfiguringSpatialTracking else { return }
 
         isPreparingRoomScan = true
-        Task {
+        enqueueSpatialTrackingOperation { generation in
             await spatialTrackingSession.stop()
-            guard screen == .game, game.mode == .roomDrive else {
+            guard generation == spatialTrackingGeneration,
+                  isPreparingRoomScan,
+                  screen == .game,
+                  game.mode == .roomDrive,
+                  scenePhase == .active,
+                  !showingRoomScan,
+                  !game.virtualModeActive,
+                  !cameraAccessDenied else {
                 isPreparingRoomScan = false
                 return
             }
@@ -402,14 +424,45 @@ struct ContentView: View {
         showingRoomScan = false
     }
 
-    /// Runs RealityKit on the same ARSession RoomPlan uses, preserving the
-    /// scanned room's world coordinate system when capture finishes.
-    private func runSpatialTracking() async {
+    /// Schedules RealityKit tracking after any earlier run/stop operation.
+    private func requestSpatialTracking() {
         #if !targetEnvironment(simulator)
-        guard screen == .game, !showingRoomScan, !game.virtualModeActive,
+        guard screen == .game,
+              scenePhase == .active,
+              !showingRoomScan,
+              !isPreparingRoomScan,
+              !game.virtualModeActive,
               !isConfiguringSpatialTracking else { return }
         isConfiguringSpatialTracking = true
-        defer { isConfiguringSpatialTracking = false }
+        enqueueSpatialTrackingOperation { generation in
+            await runSpatialTracking(generation: generation)
+        }
+        #endif
+    }
+
+    /// Stops tracking in the same serial operation chain as startup. A newer
+    /// request invalidates the completion of this one before it can mutate AR.
+    private func requestSpatialTrackingStop() {
+        #if !targetEnvironment(simulator)
+        isConfiguringSpatialTracking = false
+        isPreparingRoomScan = false
+        enqueueSpatialTrackingOperation { generation in
+            await spatialTrackingSession.stop()
+            guard generation == spatialTrackingGeneration else { return }
+            arSession.pause()
+        }
+        #endif
+    }
+
+    /// Runs RealityKit on the same ARSession RoomPlan uses, preserving the
+    /// scanned room's world coordinate system when capture finishes.
+    private func runSpatialTracking(generation: UInt) async {
+        #if !targetEnvironment(simulator)
+        defer {
+            if generation == spatialTrackingGeneration {
+                isConfiguringSpatialTracking = false
+            }
+        }
 
         let spatialConfiguration = SpatialTrackingSession.Configuration(
             tracking: [.camera, .world, .plane],
@@ -422,16 +475,37 @@ struct ContentView: View {
             session: arSession,
             arConfiguration: arConfiguration
         )
+        guard generation == spatialTrackingGeneration else { return }
         if unavailable?.missingCameraAuthorization == true {
             cameraAccessDenied = true
             return
         }
-        guard screen == .game, !game.virtualModeActive else { return }
+        guard screen == .game,
+              scenePhase == .active,
+              !showingRoomScan,
+              !isPreparingRoomScan,
+              !game.virtualModeActive else { return }
         // With the custom-session overload, the app owns the ARSession
         // lifecycle. SpatialTrackingSession connects it to RealityKit, but
         // doesn't start camera capture on the app's behalf.
         arSession.run(arConfiguration)
         #endif
+    }
+
+    /// Serializes SpatialTrackingSession operations and gives each request a
+    /// generation token so stale async completions cannot restart tracking.
+    private func enqueueSpatialTrackingOperation(
+        _ operation: @escaping @MainActor (UInt) async -> Void
+    ) {
+        spatialTrackingGeneration &+= 1
+        let generation = spatialTrackingGeneration
+        let previousOperation = spatialTrackingOperation
+        spatialTrackingOperation = Task { @MainActor in
+            await previousOperation?.value
+            guard !Task.isCancelled,
+                  generation == spatialTrackingGeneration else { return }
+            await operation(generation)
+        }
     }
 
     #if !targetEnvironment(simulator)

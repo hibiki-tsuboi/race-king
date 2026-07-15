@@ -14,6 +14,7 @@ private final class PeerConnectionContext {
     let rejectionMessage: String?
     var playerID: UUID?
     var receiveBuffer = Data()
+    var handshakeTimeoutTask: Task<Void, Never>?
 
     init(connection: NWConnection, rejectionMessage: String? = nil) {
         self.connection = connection
@@ -83,6 +84,11 @@ final class PeerRaceSession {
     static let maximumPlayers = 5
     private static let serviceType = "_anywheregp._tcp"
     private static let maximumPacketSize = 64 * 1024 * 1024
+    /// A hello only contains the guest ID, display name, version, and car choice.
+    private static let maximumHelloPacketSize = 4 * 1024
+    /// Limits sockets that have not yet supplied a valid hello packet.
+    private static let maximumPendingHostConnections = 2
+    private static let handshakeTimeout: Duration = .seconds(5)
     private static let maximumWorldMapSize = 40 * 1024 * 1024
     private static let maximumCarModelSize = 12 * 1024 * 1024
     private static let snapshotInterval: TimeInterval = 1.0 / 20.0
@@ -343,6 +349,8 @@ final class PeerRaceSession {
         browser?.browseResultsChangedHandler = nil
         browser?.cancel()
         for context in connections.values {
+            context.handshakeTimeoutTask?.cancel()
+            context.handshakeTimeoutTask = nil
             context.connection.stateUpdateHandler = nil
             context.connection.cancel()
         }
@@ -702,10 +710,22 @@ final class PeerRaceSession {
             connection.cancel()
             return
         }
+
+        let pendingConnectionCount = connections.values.lazy.filter {
+            $0.playerID == nil
+        }.count
+        let maximumConnectionCount = Self.maximumPlayers - 1
+            + Self.maximumPendingHostConnections
+        guard pendingConnectionCount < Self.maximumPendingHostConnections,
+              connections.count < maximumConnectionCount else {
+            connection.cancel()
+            return
+        }
+
         let message: String?
         if raceInProgress {
             message = "レース中のルームには参加できません"
-        } else if connections.count >= Self.maximumPlayers - 1 {
+        } else if participants.count >= Self.maximumPlayers {
             message = "このルームは満員です"
         } else {
             message = nil
@@ -718,6 +738,9 @@ final class PeerRaceSession {
 
     private func attach(_ context: PeerConnectionContext) {
         connections[context.id] = context
+        if role == .host {
+            scheduleHandshakeTimeout(for: context)
+        }
         context.connection.stateUpdateHandler = { [weak self, weak context] newState in
             MainActor.assumeIsolated {
                 guard let self, let context,
@@ -726,6 +749,17 @@ final class PeerRaceSession {
             }
         }
         context.connection.start(queue: .main)
+    }
+
+    private func scheduleHandshakeTimeout(for context: PeerConnectionContext) {
+        context.handshakeTimeoutTask?.cancel()
+        context.handshakeTimeoutTask = Task { [weak self, weak context] in
+            try? await Task.sleep(for: Self.handshakeTimeout)
+            guard !Task.isCancelled, let self, let context,
+                  self.connections[context.id] != nil,
+                  context.playerID == nil else { return }
+            self.close(context)
+        }
     }
 
     private func handleConnectionState(
@@ -815,6 +849,8 @@ final class PeerRaceSession {
 
     private func close(_ context: PeerConnectionContext) {
         guard connections.removeValue(forKey: context.id) != nil else { return }
+        context.handshakeTimeoutTask?.cancel()
+        context.handshakeTimeoutTask = nil
         context.connection.stateUpdateHandler = nil
         context.connection.cancel()
         if hostConnectionID == context.id { hostConnectionID = nil }
@@ -895,9 +931,12 @@ final class PeerRaceSession {
     }
 
     private func receiveNextChunk(from context: PeerConnectionContext) {
+        let maximumLength = isAwaitingGuestHello(context)
+            ? Self.maximumHelloPacketSize + MemoryLayout<UInt32>.size
+            : 64 * 1024
         context.connection.receive(
             minimumIncompleteLength: 1,
-            maximumLength: 64 * 1024
+            maximumLength: maximumLength
         ) { [weak self, weak context] content, _, isComplete, error in
             MainActor.assumeIsolated {
                 guard let self, let context,
@@ -921,10 +960,14 @@ final class PeerRaceSession {
     private func consumeFrames(from context: PeerConnectionContext) -> Bool {
         let headerSize = MemoryLayout<UInt32>.size
         while context.receiveBuffer.count >= headerSize {
+            let awaitingHello = isAwaitingGuestHello(context)
+            let maximumPacketSize = awaitingHello
+                ? Self.maximumHelloPacketSize
+                : Self.maximumPacketSize
             let length = context.receiveBuffer.prefix(headerSize).reduce(UInt32(0)) {
                 ($0 << 8) | UInt32($1)
             }
-            guard length > 0, length <= Self.maximumPacketSize else {
+            guard length > 0, length <= maximumPacketSize else {
                 connectionLost(context, message: "不正な対戦データを受信しました")
                 return false
             }
@@ -934,8 +977,15 @@ final class PeerRaceSession {
             context.receiveBuffer.removeSubrange(0..<frameSize)
             do {
                 let packet = try decoder.decode(PeerRacePacket.self, from: payload)
+                guard !awaitingHello || packet.kind == .hello else {
+                    connectionLost(context, message: "不正な対戦データを受信しました")
+                    return false
+                }
                 if role == .host {
                     handleHostPacket(packet, from: context)
+                    // A rejected hello remains unauthenticated until the delayed
+                    // rejection response has had time to reach the guest.
+                    if awaitingHello, context.playerID == nil { return false }
                 } else {
                     handleGuestPacket(packet)
                 }
@@ -948,6 +998,10 @@ final class PeerRaceSession {
             }
         }
         return true
+    }
+
+    private func isAwaitingGuestHello(_ context: PeerConnectionContext) -> Bool {
+        role == .host && context.playerID == nil
     }
 
     // MARK: - Host packet handling
@@ -1061,6 +1115,8 @@ final class PeerRaceSession {
         }
 
         context.playerID = playerID
+        context.handshakeTimeoutTask?.cancel()
+        context.handshakeTimeoutTask = nil
         errorMessage = nil
         let rawName = packet.name?.trimmingCharacters(in: .whitespacesAndNewlines)
         let name = String((rawName?.isEmpty == false ? rawName! : "参加者").prefix(40))
@@ -1093,6 +1149,8 @@ final class PeerRaceSession {
     private func reject(
         _ context: PeerConnectionContext, message: String
     ) {
+        context.handshakeTimeoutTask?.cancel()
+        context.handshakeTimeoutTask = nil
         _ = send(.joinRejected(message), to: context)
         Task { [weak self, weak context] in
             try? await Task.sleep(for: .milliseconds(300))
