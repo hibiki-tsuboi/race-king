@@ -5,14 +5,15 @@
 
 import Foundation
 
-/// A bundled car that both nearby-race clients can identify without
-/// transferring model files. Raw values are part of the wire protocol.
+/// A car selection shared by nearby-race clients. Raw values are part of the
+/// wire protocol; the imported option also transfers its USDZ for the session.
 enum RaceCarChoice: String, CaseIterable, Codable, Identifiable, Sendable {
     case green
     case red
     case blue
     case white
     case yellow
+    case imported
 
     var id: Self { self }
 
@@ -23,16 +24,18 @@ enum RaceCarChoice: String, CaseIterable, Codable, Identifiable, Sendable {
         case .blue: "青"
         case .white: "白"
         case .yellow: "黄"
+        case .imported: "取込"
         }
     }
 
-    var resourceName: String {
+    var resourceName: String? {
         switch self {
         case .green: "PlayerCar"
         case .red: "AICar1"
         case .blue: "AICar2"
         case .white: "AICar3"
         case .yellow: "AICar4"
+        case .imported: nil
         }
     }
 }

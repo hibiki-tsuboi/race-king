@@ -296,6 +296,33 @@ struct ContentView: View {
         multiplayer.onRemoteCarChoiceChanged = { [weak game] choice in
             game?.setPeerRaceRemoteCar(choice)
         }
+        multiplayer.onRemoteImportedCarModel = {
+            [weak game, weak multiplayer] data, flipped, id in
+            let temporaryURL = FileManager.default.temporaryDirectory
+                .appending(path: "RaceKing-PeerCar-\(id.uuidString).usdz")
+            Task {
+                defer { try? FileManager.default.removeItem(at: temporaryURL) }
+                do {
+                    try data.write(to: temporaryURL, options: .atomic)
+                    let template = try await Entity(contentsOf: temporaryURL)
+                    guard let game, let multiplayer,
+                          multiplayer.isCurrentRemoteImportedCarModel(id: id) else {
+                        return
+                    }
+                    game.setPeerRaceRemoteImportedCar(template, flipped: flipped)
+                    multiplayer.confirmRemoteImportedCarModel(id: id)
+                } catch {
+                    guard let multiplayer,
+                          multiplayer.isCurrentRemoteImportedCarModel(id: id) else {
+                        return
+                    }
+                    multiplayer.failRemoteImportedCarModel(
+                        id: id,
+                        message: "カスタム車を読み込めませんでした: \(error.localizedDescription)"
+                    )
+                }
+            }
+        }
         multiplayer.onFinishResult = { [weak game] position, raceTime in
             game?.finishPeerRace(position: position, raceTime: raceTime)
         }

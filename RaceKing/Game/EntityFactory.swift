@@ -101,6 +101,10 @@ enum EntityFactory {
         supportDirectory.appending(path: "PlayerCar.usdz")
     }
 
+    static var hasImportedPlayerCar: Bool {
+        FileManager.default.fileExists(atPath: importedCarURL.path)
+    }
+
     /// Imported model for one of the four AI karts (slots 0-3).
     static func importedAICarURL(index: Int) -> URL {
         supportDirectory.appending(path: "AICar\(index + 1).usdz")
@@ -120,7 +124,8 @@ enum EntityFactory {
 
     /// Loads one of the five built-in cars shared by every nearby-race client.
     static func bundledRaceCarTemplate(for choice: RaceCarChoice) -> Entity? {
-        try? Entity.load(named: choice.resourceName)
+        guard let resourceName = choice.resourceName else { return nil }
+        return try? Entity.load(named: resourceName)
     }
 
     /// Models for the AI karts: an imported file wins over the bundled
@@ -150,7 +155,12 @@ enum EntityFactory {
 
     /// Replaces a car with a synchronized built-in model. The color is also
     /// used by the procedural fallback if the bundled USDZ cannot be loaded.
-    static func populateRaceCar(_ car: Entity, choice: RaceCarChoice) {
+    static func populateRaceCar(
+        _ car: Entity,
+        choice: RaceCarChoice,
+        importedTemplate: Entity? = nil,
+        importedModelFlipped: Bool = false
+    ) {
         let fallbackColor: SimpleMaterial.Color = switch choice {
         case .green:
             .init(red: 0.08, green: 0.42, blue: 0.2, alpha: 1)
@@ -162,20 +172,33 @@ enum EntityFactory {
             .init(white: 0.9, alpha: 1)
         case .yellow:
             .init(red: 0.95, green: 0.72, blue: 0.08, alpha: 1)
+        case .imported:
+            .init(red: 0.6, green: 0.25, blue: 0.85, alpha: 1)
         }
+        let template = choice == .imported
+            ? importedTemplate : bundledRaceCarTemplate(for: choice)
         populate(
             car,
             bodyColor: fallbackColor,
-            customTemplate: bundledRaceCarTemplate(for: choice)
+            customTemplate: template,
+            modelFlipped: choice == .imported ? importedModelFlipped : false
         )
     }
 
     /// Replaces a car's body (custom model or procedural kart) in place,
     /// keeping the entity itself — and therefore its transform — intact.
-    static func populate(_ car: Entity, bodyColor: SimpleMaterial.Color, customTemplate: Entity?) {
+    static func populate(
+        _ car: Entity,
+        bodyColor: SimpleMaterial.Color,
+        customTemplate: Entity?,
+        modelFlipped: Bool? = nil
+    ) {
         for child in Array(car.children) { child.removeFromParent() }
         if let customTemplate {
-            car.addChild(normalizedCustomCar(from: customTemplate))
+            car.addChild(normalizedCustomCar(
+                from: customTemplate,
+                flipped: modelFlipped ?? customCarFlipped
+            ))
         } else {
             addProceduralKart(to: car, bodyColor: bodyColor)
         }
@@ -184,7 +207,9 @@ enum EntityFactory {
 
     /// Clones and normalizes a custom model: ~9.5 cm long, resting on y = 0,
     /// centered, nose toward +Z (after `customCarYawFix`).
-    private static func normalizedCustomCar(from template: Entity) -> Entity {
+    private static func normalizedCustomCar(
+        from template: Entity, flipped: Bool
+    ) -> Entity {
         let model = template.clone(recursive: true)
         let bounds = model.visualBounds(relativeTo: nil)
         let footprint = max(bounds.extents.x, bounds.extents.z)
@@ -196,7 +221,7 @@ enum EntityFactory {
             -bounds.center.x * scale, -bounds.min.y * scale, -bounds.center.z * scale,
         ]
         let wrapper = Entity()
-        let yaw = detectForwardYaw(of: model) + (customCarFlipped ? .pi : 0)
+        let yaw = detectForwardYaw(of: model) + (flipped ? .pi : 0)
         wrapper.orientation = simd_quatf(angle: yaw, axis: [0, 1, 0])
         wrapper.addChild(model)
         return wrapper

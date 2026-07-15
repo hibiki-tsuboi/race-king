@@ -30,7 +30,8 @@ struct GameOverlayView: View {
                     game: game,
                     onReset: resetRace,
                     onChooseMode: { requestExit(to: .modeSelection) },
-                    onReturnToTitle: { requestExit(to: .title) }
+                    onReturnToTitle: { requestExit(to: .title) },
+                    onImportedCarChanged: multiplayer.refreshLocalImportedCar
                 )
                 Spacer()
                 ControlsView(game: game)
@@ -402,6 +403,7 @@ struct HUDView: View {
     var onReset: () -> Void = {}
     var onChooseMode: () -> Void = {}
     var onReturnToTitle: () -> Void = {}
+    var onImportedCarChanged: () -> Void = {}
     @State private var showingCarImporter = false
     @State private var importSlot: CarImportSlot = .player
     @State private var importErrorMessage: String?
@@ -612,12 +614,16 @@ struct HUDView: View {
                     EntityFactory.customCarFlipped = false
                     EntityFactory.customCarTemplate = template
                     game.setCustomCarModel(template)
+                    onImportedCarChanged()
                 case .ai(let index):
                     EntityFactory.aiCarTemplates[index] = template
                     game.setAICarModel(template, at: index)
                 }
             } catch {
                 try? FileManager.default.removeItem(at: destination)
+                if case .player = slot {
+                    onImportedCarChanged()
+                }
                 importErrorMessage = error.localizedDescription
             }
             isImportingCar = false
@@ -627,6 +633,7 @@ struct HUDView: View {
     /// Re-populates every custom car, e.g. after toggling the flip setting.
     private func reapplyCustomCars() {
         game.setCustomCarModel(EntityFactory.customCarTemplate)
+        onImportedCarChanged()
         for (index, template) in EntityFactory.aiCarTemplates.enumerated() where template != nil {
             game.setAICarModel(template, at: index)
         }
@@ -638,6 +645,7 @@ struct HUDView: View {
         let bundled = try? Entity.load(named: "PlayerCar")
         EntityFactory.customCarTemplate = bundled
         game.setCustomCarModel(bundled)
+        onImportedCarChanged()
         for index in EntityFactory.aiCarTemplates.indices {
             try? FileManager.default.removeItem(at: EntityFactory.importedAICarURL(index: index))
             let template = EntityFactory.bundledAICarTemplate(index: index)

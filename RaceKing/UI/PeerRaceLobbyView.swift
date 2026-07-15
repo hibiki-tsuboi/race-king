@@ -51,12 +51,38 @@ struct PeerRaceLobbyView: View {
                     set: { multiplayer.setLocalCarChoice($0) }
                 )
             ) {
-                ForEach(RaceCarChoice.allCases) { choice in
+                ForEach(multiplayer.availableLocalCarChoices) { choice in
                     Text(choice.displayName)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
                         .tag(choice)
                 }
             }
             .pickerStyle(.segmented)
+
+            if multiplayer.isSynchronizingCarModels {
+                HStack(spacing: 7) {
+                    ProgressView()
+                        .tint(.white)
+                    Text("カスタム車を相手と共有しています…")
+                        .font(.caption2.bold())
+                }
+                .foregroundStyle(.cyan)
+            } else if let message = multiplayer.carModelErrorMessage {
+                Text(message)
+                    .font(.caption2.bold())
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(.red)
+            } else if multiplayer.localCarChoice == .imported,
+                      multiplayer.state != .connected {
+                Text("接続時にUSDZを相手へ送信します")
+                    .font(.caption2.bold())
+                    .foregroundStyle(.cyan)
+            } else if !multiplayer.localImportedCarAvailable {
+                Text("歯車からUSDZを読み込むと「取込」を選べます")
+                    .font(.caption2)
+                    .foregroundStyle(.white.opacity(0.65))
+            }
         }
     }
 
@@ -78,6 +104,7 @@ struct PeerRaceLobbyView: View {
         case .blue: .blue
         case .white: .white
         case .yellow: .yellow
+        case .imported: .purple
         case nil: .white.opacity(0.65)
         }
     }

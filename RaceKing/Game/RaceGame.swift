@@ -217,6 +217,9 @@ final class RaceGame {
     private var playerTouchingWall = false
     private var peerIsHost = true
     private var peerLocalCarChoice: RaceCarChoice = .green
+    private var peerRemoteCarChoice: RaceCarChoice?
+    private var peerRemoteImportedCarTemplate: Entity?
+    private var peerRemoteImportedCarFlipped = false
     private var peerLocalFinished = false
     private var peerProgress: Float = 0
     private(set) var peerLapCount = 0
@@ -524,7 +527,34 @@ final class RaceGame {
     }
 
     func setPeerRaceRemoteCar(_ choice: RaceCarChoice?) {
-        EntityFactory.populateRaceCar(peerCar, choice: choice ?? .blue)
+        if choice != .imported {
+            peerRemoteImportedCarTemplate = nil
+            peerRemoteImportedCarFlipped = false
+        } else if peerRemoteCarChoice != .imported {
+            peerRemoteImportedCarTemplate = nil
+            peerRemoteImportedCarFlipped = false
+        }
+        peerRemoteCarChoice = choice
+        EntityFactory.populateRaceCar(
+            peerCar,
+            choice: choice ?? .blue,
+            importedTemplate: peerRemoteImportedCarTemplate,
+            importedModelFlipped: peerRemoteImportedCarFlipped
+        )
+        refreshPeerCarEffects()
+    }
+
+    /// Applies an imported model received from the opponent for this session.
+    func setPeerRaceRemoteImportedCar(_ template: Entity, flipped: Bool) {
+        guard peerRemoteCarChoice == .imported else { return }
+        peerRemoteImportedCarTemplate = template
+        peerRemoteImportedCarFlipped = flipped
+        EntityFactory.populateRaceCar(
+            peerCar,
+            choice: .imported,
+            importedTemplate: template,
+            importedModelFlipped: flipped
+        )
         refreshPeerCarEffects()
     }
 
@@ -1131,7 +1161,16 @@ final class RaceGame {
         customTemplate: Entity? = EntityFactory.customCarTemplate
     ) {
         if mode == .peerRace {
-            EntityFactory.populateRaceCar(car, choice: peerLocalCarChoice)
+            if peerLocalCarChoice == .imported {
+                EntityFactory.populateRaceCar(
+                    car,
+                    choice: .imported,
+                    importedTemplate: customTemplate,
+                    importedModelFlipped: EntityFactory.customCarFlipped
+                )
+            } else {
+                EntityFactory.populateRaceCar(car, choice: peerLocalCarChoice)
+            }
         } else {
             EntityFactory.populate(
                 car,
