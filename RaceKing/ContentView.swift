@@ -164,11 +164,6 @@ struct ContentView: View {
                 multiplayer.disconnect()
             }
         }
-        .onChange(of: multiplayer.role) {
-            if let role = multiplayer.role {
-                game.setPeerRole(isHost: role == .host)
-            }
-        }
         .onChange(of: scenePhase) {
             if screen == .game, scenePhase == .active {
                 refreshCameraAuthorization()
@@ -287,36 +282,55 @@ struct ContentView: View {
         multiplayer.onResetRace = { [weak game] in
             game?.reset()
         }
-        multiplayer.onCarState = { [weak game] state in
-            game?.applyPeerCarState(state)
+        multiplayer.onCarState = { [weak game] playerID, state in
+            game?.applyPeerCarState(playerID: playerID, state: state)
         }
         multiplayer.onLocalCarChoiceChanged = { [weak game] choice in
             game?.setPeerRaceLocalCar(choice)
         }
-        multiplayer.onRemoteCarChoiceChanged = { [weak game] choice in
-            game?.setPeerRaceRemoteCar(choice)
+        multiplayer.onParticipantsChanged = { [weak game] participants, localID in
+            game?.configurePeerRaceParticipants(
+                participants,
+                localPlayerID: localID
+            )
         }
         multiplayer.onRemoteImportedCarModel = {
-            [weak game, weak multiplayer] data, flipped, id in
+            [weak game, weak multiplayer] playerID, data, flipped, id in
             let temporaryURL = FileManager.default.temporaryDirectory
-                .appending(path: "RaceKing-PeerCar-\(id.uuidString).usdz")
+                .appending(
+                    path: "RaceKing-PeerCar-\(playerID.uuidString)-\(id.uuidString).usdz"
+                )
             Task {
                 defer { try? FileManager.default.removeItem(at: temporaryURL) }
                 do {
                     try data.write(to: temporaryURL, options: .atomic)
                     let template = try await Entity(contentsOf: temporaryURL)
                     guard let game, let multiplayer,
-                          multiplayer.isCurrentRemoteImportedCarModel(id: id) else {
+                          multiplayer.isCurrentRemoteImportedCarModel(
+                            playerID: playerID,
+                            id: id
+                          ) else {
                         return
                     }
-                    game.setPeerRaceRemoteImportedCar(template, flipped: flipped)
-                    multiplayer.confirmRemoteImportedCarModel(id: id)
+                    game.setPeerRaceRemoteImportedCar(
+                        playerID: playerID,
+                        template: template,
+                        flipped: flipped
+                    )
+                    multiplayer.confirmRemoteImportedCarModel(
+                        playerID: playerID,
+                        id: id
+                    )
                 } catch {
                     guard let multiplayer,
-                          multiplayer.isCurrentRemoteImportedCarModel(id: id) else {
+                          multiplayer.isCurrentRemoteImportedCarModel(
+                            playerID: playerID,
+                            id: id
+                          ) else {
                         return
                     }
                     multiplayer.failRemoteImportedCarModel(
+                        playerID: playerID,
                         id: id,
                         message: "カスタム車を読み込めませんでした: \(error.localizedDescription)"
                     )
@@ -326,15 +340,17 @@ struct ContentView: View {
         multiplayer.onFinishResult = { [weak game] position, raceTime in
             game?.finishPeerRace(position: position, raceTime: raceTime)
         }
-        multiplayer.onConnectionChanged = { [weak game, weak peerCourse] connected in
-            game?.setPeerConnected(connected)
+        multiplayer.onConnectionChanged = { [weak peerCourse] connected in
             peerCourse?.connectionChanged(connected)
         }
         game.onPeerRaceLocalFinish = { [weak multiplayer] raceTime in
             multiplayer?.reportLocalFinish(raceTime: raceTime)
         }
         game.setPeerRaceLocalCar(multiplayer.localCarChoice)
-        game.setPeerRaceRemoteCar(multiplayer.remoteCarChoice)
+        game.configurePeerRaceParticipants(
+            multiplayer.participants,
+            localPlayerID: multiplayer.localPlayerID
+        )
     }
 
     private var roomPlanSupported: Bool {

@@ -32,6 +32,71 @@ enum GameEvent {
     case driftEnded(boostLevel: Int)
 }
 
+/// Scene and interpolation state for one remote Wi-Fi racer.
+private final class RemoteRaceCar {
+    let playerID: UUID
+    let entity: Entity
+    var slot: Int
+    var choice: RaceCarChoice = .blue
+    var importedTemplate: Entity?
+    var importedModelFlipped = false
+    var progress: Float = 0
+    var lapCount = 0
+    var finished = false
+    var targetPosition = SIMD3<Float>.zero
+    var targetHeading: Float = 0
+    var displayedHeading: Float = 0
+    var hasState = false
+    var glowBlue: Entity?
+    var glowOrange: Entity?
+    var boostFlame: Entity?
+
+    init(participant: PeerRaceParticipant) {
+        playerID = participant.id
+        slot = participant.slot
+        entity = EntityFactory.makeCar(
+            bodyColor: .init(red: 0.2, green: 0.45, blue: 0.95, alpha: 1),
+            allowCustomModel: false
+        )
+        applyChoice(participant.carChoice)
+        entity.isEnabled = false
+    }
+
+    func applyChoice(_ newChoice: RaceCarChoice) {
+        if newChoice != .imported || choice != .imported {
+            importedTemplate = nil
+            importedModelFlipped = false
+        }
+        choice = newChoice
+        EntityFactory.populateRaceCar(
+            entity,
+            choice: newChoice,
+            importedTemplate: importedTemplate,
+            importedModelFlipped: importedModelFlipped
+        )
+        refreshEffects()
+    }
+
+    func applyImportedModel(_ template: Entity, flipped: Bool) {
+        guard choice == .imported else { return }
+        importedTemplate = template
+        importedModelFlipped = flipped
+        EntityFactory.populateRaceCar(
+            entity,
+            choice: .imported,
+            importedTemplate: template,
+            importedModelFlipped: flipped
+        )
+        refreshEffects()
+    }
+
+    func refreshEffects() {
+        glowBlue = entity.findEntity(named: "glowBlue")
+        glowOrange = entity.findEntity(named: "glowOrange")
+        boostFlame = entity.findEntity(named: "boostFlame")
+    }
+}
+
 /// Drives the whole game: owns the scene entities, integrates car physics,
 /// and runs circuit races or a RoomPlan-powered free drive.
 @Observable
@@ -58,6 +123,11 @@ final class RaceGame {
     static let maximumCourseScale: Float = 2.0
     static let minimumRoomModelOpacity: Float = 0.08
     static let maximumRoomModelOpacity: Float = 0.65
+    private static let raceGridSlots: [(back: Float, lateral: Float)] = [
+        (0.08, -0.037), (0.08, 0.037),
+        (0.17, -0.037), (0.17, 0.037),
+        (0.26, 0),
+    ]
 
     // MARK: - State observed by the HUD
 
@@ -99,8 +169,10 @@ final class RaceGame {
     private(set) var courseScale: Float = 1
     /// Y-axis rotation accumulated by the two-finger rotation gesture.
     private(set) var courseRotation: Float = 0
-    /// Whether a nearby opponent is currently available for two-player mode.
+    /// Whether at least one nearby opponent is currently in the room.
     private(set) var peerConnected = false
+    /// Latest completed-lap count for every remote Wi-Fi racer.
+    private(set) var peerLapCounts: [UUID: Int] = [:]
 
     var canStart: Bool { mode != .roomDrive || roomStartPlaced }
 
@@ -179,7 +251,6 @@ final class RaceGame {
     }
     private let car: Entity
     private let ghostCar: Entity
-    private let peerCar: Entity
     private let checkpoints: [SIMD3<Float>]
     private var aiDrivers: [AIDriver] = []
     private var roomEnvironment: RoomDriveEnvironment?
@@ -215,22 +286,10 @@ final class RaceGame {
     private var offRoadPulse: TimeInterval = 0
     private var wallHitCooldown: TimeInterval = 0
     private var playerTouchingWall = false
-    private var peerIsHost = true
     private var peerLocalCarChoice: RaceCarChoice = .green
-    private var peerRemoteCarChoice: RaceCarChoice?
-    private var peerRemoteImportedCarTemplate: Entity?
-    private var peerRemoteImportedCarFlipped = false
+    private var peerLocalSlot = 0
     private var peerLocalFinished = false
-    private var peerProgress: Float = 0
-    private(set) var peerLapCount = 0
-    private var peerFinished = false
-    private var peerTargetPosition = SIMD3<Float>.zero
-    private var peerTargetHeading: Float = 0
-    private var peerDisplayedHeading: Float = 0
-    private var hasPeerCarState = false
-    private var peerGlowBlue: Entity?
-    private var peerGlowOrange: Entity?
-    private var peerBoostFlame: Entity?
+    @ObservationIgnored private var remoteRaceCars: [UUID: RemoteRaceCar] = [:]
 
     // MARK: - Drift bookkeeping
 
@@ -256,13 +315,8 @@ final class RaceGame {
         ghost = GhostRecorder(trackLength: layout.totalLength)
         bestLapKey = "bestLapTime-\(Int(layout.totalLength * 1000))"
         ghostCar = EntityFactory.makeCar(bodyColor: EntityFactory.ghostBodyColor)
-        peerCar = EntityFactory.makeCar(
-            bodyColor: .init(red: 0.2, green: 0.45, blue: 0.95, alpha: 1),
-            allowCustomModel: false
-        )
         ghostCar.components.set(OpacityComponent(opacity: 0.35))
         ghostCar.isEnabled = false
-        peerCar.isEnabled = false
         checkpoints = layout.checkpoints
         aiDrivers = AIDriver.defaultOpponents()
         ghostEnabled = UserDefaults.standard.object(forKey: "ghostEnabled") as? Bool ?? true
@@ -284,7 +338,6 @@ final class RaceGame {
         root.addChild(car)
         root.addChild(ghostCar)
         refreshPlayerCarEffects()
-        refreshPeerCarEffects()
         refreshRoomCarFootprint()
 
         let savedBest = UserDefaults.standard.double(forKey: bestLapKey)
@@ -517,7 +570,7 @@ final class RaceGame {
         aiDrivers[index].applyModel(template)
     }
 
-    // MARK: - Nearby two-player race
+    // MARK: - Nearby multiplayer race
 
     func setPeerRaceLocalCar(_ choice: RaceCarChoice) {
         peerLocalCarChoice = choice
@@ -526,50 +579,65 @@ final class RaceGame {
         }
     }
 
-    func setPeerRaceRemoteCar(_ choice: RaceCarChoice?) {
-        if choice != .imported {
-            peerRemoteImportedCarTemplate = nil
-            peerRemoteImportedCarFlipped = false
-        } else if peerRemoteCarChoice != .imported {
-            peerRemoteImportedCarTemplate = nil
-            peerRemoteImportedCarFlipped = false
+    /// Adds, updates, or removes the remote scene cars from the host roster.
+    func configurePeerRaceParticipants(
+        _ participants: [PeerRaceParticipant], localPlayerID: UUID
+    ) {
+        guard let local = participants.first(where: { $0.id == localPlayerID }) else {
+            for remote in remoteRaceCars.values { remote.entity.removeFromParent() }
+            remoteRaceCars.removeAll()
+            peerLapCounts.removeAll()
+            peerConnected = false
+            return
         }
-        peerRemoteCarChoice = choice
-        EntityFactory.populateRaceCar(
-            peerCar,
-            choice: choice ?? .blue,
-            importedTemplate: peerRemoteImportedCarTemplate,
-            importedModelFlipped: peerRemoteImportedCarFlipped
-        )
-        refreshPeerCarEffects()
-    }
 
-    /// Applies an imported model received from the opponent for this session.
-    func setPeerRaceRemoteImportedCar(_ template: Entity, flipped: Bool) {
-        guard peerRemoteCarChoice == .imported else { return }
-        peerRemoteImportedCarTemplate = template
-        peerRemoteImportedCarFlipped = flipped
-        EntityFactory.populateRaceCar(
-            peerCar,
-            choice: .imported,
-            importedTemplate: template,
-            importedModelFlipped: flipped
-        )
-        refreshPeerCarEffects()
-    }
+        peerLocalSlot = local.slot
+        let remoteParticipants = participants.filter { $0.id != localPlayerID }
+        let remoteIDs = Set(remoteParticipants.map(\.id))
 
-    func setPeerRole(isHost: Bool) {
-        guard phase == .ready else { return }
-        peerIsHost = isHost
-        if mode == .peerRace { placeCarsOnGrid() }
-    }
-
-    func setPeerConnected(_ connected: Bool) {
-        peerConnected = connected
-        peerCar.isEnabled = connected && mode == .peerRace
-        if !connected, mode == .peerRace, phase != .ready {
-            reset()
+        for id in Array(remoteRaceCars.keys) where !remoteIDs.contains(id) {
+            remoteRaceCars[id]?.entity.removeFromParent()
+            remoteRaceCars.removeValue(forKey: id)
+            peerLapCounts.removeValue(forKey: id)
         }
+        for participant in remoteParticipants {
+            if let remote = remoteRaceCars[participant.id] {
+                remote.slot = participant.slot
+                if remote.choice != participant.carChoice {
+                    remote.applyChoice(participant.carChoice)
+                }
+            } else {
+                remoteRaceCars[participant.id] = RemoteRaceCar(
+                    participant: participant
+                )
+                peerLapCounts[participant.id] = 0
+            }
+        }
+
+        let wasConnected = peerConnected
+        peerConnected = !remoteRaceCars.isEmpty
+        if mode == .peerRace {
+            if phase == .ready {
+                placeCarsOnGrid()
+            } else {
+                for remote in remoteRaceCars.values {
+                    if remote.entity.parent == nil { root.addChild(remote.entity) }
+                    remote.entity.isEnabled = true
+                }
+                if wasConnected, !peerConnected { reset() }
+            }
+        }
+    }
+
+    /// Applies an imported model received for one participant in this session.
+    func setPeerRaceRemoteImportedCar(
+        playerID: UUID, template: Entity, flipped: Bool
+    ) {
+        remoteRaceCars[playerID]?.applyImportedModel(template, flipped: flipped)
+    }
+
+    func peerLapCount(for playerID: UUID) -> Int {
+        peerLapCounts[playerID] ?? 0
     }
 
     /// A compact course-local snapshot; independent AR placement stays local.
@@ -588,9 +656,12 @@ final class RaceGame {
         )
     }
 
-    /// Applies only finite, plausible values received from the nearby peer.
-    func applyPeerCarState(_ state: PeerRacePacket.CarState) {
+    /// Applies only finite, plausible values received from a nearby racer.
+    func applyPeerCarState(
+        playerID: UUID, state: PeerRacePacket.CarState
+    ) {
         guard mode == .peerRace,
+              let remote = remoteRaceCars[playerID],
               state.x.isFinite, state.y.isFinite, state.z.isFinite,
               state.heading.isFinite, state.progress.isFinite,
               abs(state.x) < 5, abs(state.y) < 2, abs(state.z) < 5,
@@ -598,27 +669,32 @@ final class RaceGame {
               (0...Self.raceLapTotal).contains(state.lapCount),
               (0...2).contains(state.driftChargeLevel) else { return }
 
-        peerTargetPosition = [state.x, state.y, state.z]
-        peerTargetHeading = state.heading
-        peerProgress = state.progress
-        peerLapCount = state.lapCount
-        peerFinished = state.finished
-        peerGlowBlue?.isEnabled = state.drifting && state.driftChargeLevel == 1
-        peerGlowOrange?.isEnabled = state.drifting && state.driftChargeLevel >= 2
-        peerBoostFlame?.isEnabled = state.boosting
+        remote.targetPosition = [state.x, state.y, state.z]
+        remote.targetHeading = state.heading
+        remote.progress = state.progress
+        remote.lapCount = state.lapCount
+        remote.finished = state.finished
+        peerLapCounts[playerID] = state.lapCount
+        remote.glowBlue?.isEnabled = state.drifting && state.driftChargeLevel == 1
+        remote.glowOrange?.isEnabled = state.drifting && state.driftChargeLevel >= 2
+        remote.boostFlame?.isEnabled = state.boosting
 
-        if !hasPeerCarState {
-            peerCar.position = peerTargetPosition
-            peerDisplayedHeading = peerTargetHeading
-            peerCar.orientation = simd_quatf(angle: peerDisplayedHeading, axis: [0, 1, 0])
-            hasPeerCarState = true
+        if !remote.hasState {
+            remote.entity.position = remote.targetPosition
+            remote.displayedHeading = remote.targetHeading
+            remote.entity.orientation = simd_quatf(
+                angle: remote.displayedHeading,
+                axis: [0, 1, 0]
+            )
+            remote.hasState = true
         }
     }
 
     /// Applies the host-authoritative result after this player finishes.
     func finishPeerRace(position: Int, raceTime: TimeInterval) {
         guard mode == .peerRace, peerLocalFinished,
-              (1...2).contains(position), raceTime.isFinite else { return }
+              (1...PeerRaceSession.maximumPlayers).contains(position),
+              raceTime.isFinite else { return }
         self.raceTime = max(0, raceTime)
         finalPosition = position
         playerPosition = position
@@ -657,7 +733,7 @@ final class RaceGame {
         finalPosition = nil
         aiFinishedCount = 0
         peerLocalFinished = false
-        peerFinished = false
+        peerLapCounts = peerLapCounts.mapValues { _ in 0 }
         ghostCar.isEnabled = false
         clearDriftState()
         placeCarsOnGrid()
@@ -678,7 +754,7 @@ final class RaceGame {
             }
         }
 
-        if mode == .peerRace { updatePeerCar(deltaTime) }
+        if mode == .peerRace { updatePeerCars(deltaTime) }
 
         let dt = Float(min(deltaTime, 1.0 / 20.0))
         switch phase {
@@ -979,17 +1055,24 @@ final class RaceGame {
     }
 
     /// Smooths 20 Hz network snapshots at the display frame rate.
-    private func updatePeerCar(_ deltaTime: TimeInterval) {
-        guard peerConnected, hasPeerCarState else { return }
+    private func updatePeerCars(_ deltaTime: TimeInterval) {
+        guard peerConnected else { return }
         let positionBlend = min(1, Float(deltaTime) * 12)
-        peerCar.position += (peerTargetPosition - peerCar.position) * positionBlend
-
-        let headingDelta = atan2(
-            sin(peerTargetHeading - peerDisplayedHeading),
-            cos(peerTargetHeading - peerDisplayedHeading)
-        )
-        peerDisplayedHeading += headingDelta * min(1, Float(deltaTime) * 14)
-        peerCar.orientation = simd_quatf(angle: peerDisplayedHeading, axis: [0, 1, 0])
+        let headingBlend = min(1, Float(deltaTime) * 14)
+        for remote in remoteRaceCars.values where remote.hasState {
+            remote.entity.position += (
+                remote.targetPosition - remote.entity.position
+            ) * positionBlend
+            let headingDelta = atan2(
+                sin(remote.targetHeading - remote.displayedHeading),
+                cos(remote.targetHeading - remote.displayedHeading)
+            )
+            remote.displayedHeading += headingDelta * headingBlend
+            remote.entity.orientation = simd_quatf(
+                angle: remote.displayedHeading,
+                axis: [0, 1, 0]
+            )
+        }
     }
 
     private func updateRanking() {
@@ -1002,12 +1085,12 @@ final class RaceGame {
         if mode == .race {
             playerPosition = aiDrivers.count { $0.progress > playerProgress } + 1
         } else if finalPosition == nil {
-            if peerFinished {
-                playerPosition = 2
-            } else if peerLocalFinished {
-                playerPosition = 1
+            if peerLocalFinished {
+                playerPosition = remoteRaceCars.values.count { $0.finished } + 1
             } else {
-                playerPosition = peerProgress > playerProgress ? 2 : 1
+                playerPosition = remoteRaceCars.values.count {
+                    $0.finished || $0.progress > playerProgress
+                } + 1
             }
         }
     }
@@ -1096,8 +1179,10 @@ final class RaceGame {
 
     private func placeCarsOnGrid() {
         for driver in aiDrivers { driver.entity.removeFromParent() }
-        peerCar.removeFromParent()
-        peerCar.isEnabled = false
+        for remote in remoteRaceCars.values {
+            remote.entity.removeFromParent()
+            remote.entity.isEnabled = false
+        }
         nextCheckpoint = 1
         playerTouchingWall = false
 
@@ -1113,26 +1198,29 @@ final class RaceGame {
             roomRoot.isEnabled = false
             movePlayer(to: root)
             car.isEnabled = true
-            let slots: [(back: Float, lateral: Float)] =
-                [
-                    (0.08, -0.037), (0.08, 0.037),
-                    (0.17, -0.037), (0.17, 0.037),
-                ]
-            for (driver, slot) in zip(aiDrivers, slots) {
+            for (driver, slot) in zip(aiDrivers, Self.raceGridSlots.prefix(4)) {
                 driver.place(back: slot.back, lateral: slot.lateral, layout: layout)
                 root.addChild(driver.entity)
             }
-            placePlayer(back: 0.26, lateral: 0)
+            let slot = Self.raceGridSlots[4]
+            placePlayer(back: slot.back, lateral: slot.lateral)
         case .peerRace:
             root.isEnabled = true
             roomRoot.isEnabled = false
             movePlayer(to: root)
             car.isEnabled = true
-            root.addChild(peerCar)
-            let localLateral: Float = peerIsHost ? -0.037 : 0.037
-            placePlayer(back: 0.08, lateral: localLateral)
-            placePeer(back: 0.08, lateral: -localLateral)
-            peerCar.isEnabled = peerConnected
+            let localSlot = Self.raceGridSlots[
+                max(0, min(Self.raceGridSlots.count - 1, peerLocalSlot))
+            ]
+            placePlayer(back: localSlot.back, lateral: localSlot.lateral)
+            for remote in remoteRaceCars.values {
+                let slot = Self.raceGridSlots[
+                    max(0, min(Self.raceGridSlots.count - 1, remote.slot))
+                ]
+                placeRemoteCar(remote, back: slot.back, lateral: slot.lateral)
+                root.addChild(remote.entity)
+                remote.entity.isEnabled = true
+            }
         case .roomDrive:
             root.isEnabled = false
             roomRoot.isEnabled = roomEnvironment != nil
@@ -1188,12 +1276,6 @@ final class RaceGame {
         boostFlame = car.findEntity(named: "boostFlame")
     }
 
-    private func refreshPeerCarEffects() {
-        peerGlowBlue = peerCar.findEntity(named: "glowBlue")
-        peerGlowOrange = peerCar.findEntity(named: "glowOrange")
-        peerBoostFlame = peerCar.findEntity(named: "boostFlame")
-    }
-
     private func applyRoomVisualizationSettings() {
         roomVisualizationRoot?.isEnabled = roomModelVisible
         roomVisualizationRoot?.components.set(
@@ -1235,21 +1317,27 @@ final class RaceGame {
         playerProgress = 0
     }
 
-    private func placePeer(back: Float, lateral: Float) {
+    private func placeRemoteCar(
+        _ remote: RemoteRaceCar, back: Float, lateral: Float
+    ) {
         let s = layout.startOffset - back
         let grid = layout.sample(at: s)
         let side = SIMD3<Float>(-grid.tangent.z, 0, grid.tangent.x)
-        peerCar.position = grid.position + side * lateral
-        peerDisplayedHeading = TrackLayout.heading(of: grid.tangent)
-        peerTargetPosition = peerCar.position
-        peerTargetHeading = peerDisplayedHeading
-        peerCar.orientation = simd_quatf(angle: peerDisplayedHeading, axis: [0, 1, 0])
-        peerProgress = 0
-        peerLapCount = 0
-        peerFinished = false
-        hasPeerCarState = false
-        peerGlowBlue?.isEnabled = false
-        peerGlowOrange?.isEnabled = false
-        peerBoostFlame?.isEnabled = false
+        remote.entity.position = grid.position + side * lateral
+        remote.displayedHeading = TrackLayout.heading(of: grid.tangent)
+        remote.targetPosition = remote.entity.position
+        remote.targetHeading = remote.displayedHeading
+        remote.entity.orientation = simd_quatf(
+            angle: remote.displayedHeading,
+            axis: [0, 1, 0]
+        )
+        remote.progress = 0
+        remote.lapCount = 0
+        remote.finished = false
+        remote.hasState = false
+        peerLapCounts[remote.playerID] = 0
+        remote.glowBlue?.isEnabled = false
+        remote.glowOrange?.isEnabled = false
+        remote.boostFlame?.isEnabled = false
     }
 }

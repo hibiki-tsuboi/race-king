@@ -104,7 +104,7 @@ struct ModeSelectionView: View {
                 id: "peerRace",
                 mode: .peerRace,
                 title: "ネットワーク対戦",
-                detail: "同じWi-FiのiPhone 2台で対戦",
+                detail: "同じWi-FiのiPhone 2〜5台で対戦",
                 systemImage: "wifi",
                 color: .blue
             ),

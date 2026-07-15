@@ -76,7 +76,7 @@ final class PeerCourseCoordinator {
         relocalizationElapsed += deltaTime
         if relocalizationElapsed >= 30 {
             multiplayer.failCourseShare(
-                "位置合わせに時間がかかっています。2台で同じ机と周囲を映して再試行してください"
+                "位置合わせに時間がかかっています。全端末で同じ机と周囲を映して再試行してください"
             )
             return
         }
@@ -118,7 +118,7 @@ final class PeerCourseCoordinator {
         multiplayer.sendCourseMap(Data(), placement: placement)
         #else
         guard !game.virtualModeActive else {
-            multiplayer.failCourseShare("実空間を共有する2人対戦ではARモードが必要です")
+            multiplayer.failCourseShare("実空間を共有するWi-Fi対戦ではARモードが必要です")
             return
         }
         guard let frame = arSession.currentFrame else {
@@ -183,7 +183,7 @@ final class PeerCourseCoordinator {
         }
         #else
         guard !game.virtualModeActive else {
-            multiplayer.failCourseShare("実空間を共有する2人対戦ではARモードが必要です")
+            multiplayer.failCourseShare("実空間を共有するWi-Fi対戦ではARモードが必要です")
             return
         }
         guard !data.isEmpty else {

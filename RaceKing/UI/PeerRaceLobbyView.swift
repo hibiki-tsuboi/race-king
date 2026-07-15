@@ -20,7 +20,7 @@ struct PeerRaceLobbyView: View {
             case .idle:
                 idleControls
             case .hosting:
-                waitingView("相手の参加を待っています…")
+                waitingView("参加者を待っています…（1/5人）")
             case .browsing:
                 roomBrowser
             case .connecting:
@@ -37,10 +37,20 @@ struct PeerRaceLobbyView: View {
 
     private var carSelectionControls: some View {
         VStack(spacing: 7) {
-            HStack(spacing: 14) {
-                carChoiceLabel("自分", choice: multiplayer.localCarChoice)
-                if multiplayer.state == .connected {
-                    carChoiceLabel("相手", choice: multiplayer.remoteCarChoice)
+            HStack {
+                Text("参加者 \(multiplayer.participants.count)/\(PeerRaceSession.maximumPlayers)")
+                    .font(.caption.bold())
+                Spacer()
+                if multiplayer.role == .host {
+                    Label("ホスト", systemImage: "crown.fill")
+                        .font(.caption2.bold())
+                        .foregroundStyle(.yellow)
+                }
+            }
+
+            VStack(spacing: 4) {
+                ForEach(multiplayer.participants) { participant in
+                    participantRow(participant)
                 }
             }
 
@@ -64,7 +74,7 @@ struct PeerRaceLobbyView: View {
                 HStack(spacing: 7) {
                     ProgressView()
                         .tint(.white)
-                    Text("カスタム車を相手と共有しています…")
+                    Text("カスタム車を参加者と共有しています…")
                         .font(.caption2.bold())
                 }
                 .foregroundStyle(.cyan)
@@ -75,7 +85,7 @@ struct PeerRaceLobbyView: View {
                     .foregroundStyle(.red)
             } else if multiplayer.localCarChoice == .imported,
                       multiplayer.state != .connected {
-                Text("接続時にUSDZを相手へ送信します")
+                Text("接続時にUSDZを参加者へ送信します")
                     .font(.caption2.bold())
                     .foregroundStyle(.cyan)
             } else if !multiplayer.localImportedCarAvailable {
@@ -86,15 +96,38 @@ struct PeerRaceLobbyView: View {
         }
     }
 
-    private func carChoiceLabel(
-        _ player: String, choice: RaceCarChoice?
-    ) -> some View {
-        Label(
-            "\(player): \(choice?.displayName ?? "確認中")",
-            systemImage: "car.side.fill"
-        )
+    private func participantRow(_ participant: PeerRaceParticipant) -> some View {
+        HStack(spacing: 6) {
+            Text("#\(participant.slot + 1)")
+                .monospacedDigit()
+                .foregroundStyle(.white.opacity(0.65))
+            Image(systemName: "car.side.fill")
+                .foregroundStyle(carColor(participant.carChoice))
+            if participant.slot == 0 {
+                Image(systemName: "crown.fill")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.yellow)
+            }
+            Text(participant.name)
+                .lineLimit(1)
+            if participant.id == multiplayer.localPlayerID {
+                Text("自分")
+                    .font(.system(size: 9, weight: .bold))
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 1)
+                    .background(.white.opacity(0.18), in: Capsule())
+            }
+            Spacer(minLength: 4)
+            Text(participant.carChoice.displayName)
+                .foregroundStyle(carColor(participant.carChoice))
+            if multiplayer.state == .connected {
+                Image(systemName: participant.isReady
+                    ? "checkmark.circle.fill" : "circle.dotted")
+                    .foregroundStyle(participant.isReady
+                        ? .green : .white.opacity(0.55))
+            }
+        }
         .font(.caption.bold())
-        .foregroundStyle(carColor(choice))
     }
 
     private func carColor(_ choice: RaceCarChoice?) -> Color {
@@ -111,7 +144,7 @@ struct PeerRaceLobbyView: View {
 
     private var idleControls: some View {
         VStack(spacing: 10) {
-            Text("同じWi-Fiにつないだ2台のiPhoneで対戦します")
+            Text("同じWi-Fiにつないだ2〜5台のiPhoneで対戦します")
                 .font(.caption.bold())
                 .multilineTextAlignment(.center)
 
@@ -204,18 +237,20 @@ struct PeerRaceLobbyView: View {
     private var connectedControls: some View {
         VStack(spacing: 9) {
             Label(
-                "\(multiplayer.peerName ?? "対戦相手")と接続しました",
+                "\(multiplayer.participants.count)人で接続中",
                 systemImage: "checkmark.circle.fill"
             )
             .font(.callout.bold())
             .foregroundStyle(.green)
 
-            courseSyncControls
-
-            HStack(spacing: 16) {
-                readinessLabel("自分", ready: multiplayer.localReady)
-                readinessLabel("相手", ready: multiplayer.remoteReady)
+            if multiplayer.role == .host,
+               multiplayer.participants.count < PeerRaceSession.maximumPlayers {
+                Text("このまま最大5人まで参加できます")
+                    .font(.caption2.bold())
+                    .foregroundStyle(.white.opacity(0.72))
             }
+
+            courseSyncControls
 
             Button {
                 multiplayer.setReady(!multiplayer.localReady)
@@ -241,7 +276,7 @@ struct PeerRaceLobbyView: View {
                 .buttonStyle(.borderedProminent)
                 .tint(.red)
                 .disabled(!multiplayer.canStartRace)
-            } else if multiplayer.localReady && multiplayer.remoteReady {
+            } else if multiplayer.localReady && multiplayer.allParticipantsReady {
                 Text("ホストのスタートを待っています")
                     .font(.caption.bold())
                     .foregroundStyle(.yellow)
@@ -261,7 +296,7 @@ struct PeerRaceLobbyView: View {
             EmptyView()
         case .hostPlacement:
             VStack(spacing: 6) {
-                Text("ホストのコースが2台共通になります")
+                Text("ホストのコースが全端末共通になります")
                     .font(.caption.bold())
                 Text("位置・向き・大きさを決めてから共有してください")
                     .font(.caption2)
@@ -291,10 +326,17 @@ struct PeerRaceLobbyView: View {
                 detail: "ホストと同じ机・床・周囲をゆっくり映してください"
             )
         case .waitingForGuest:
-            courseProgress(
-                "相手がコースを位置合わせ中です",
-                detail: "相手のiPhoneで同じ場所を映してください"
-            )
+            if multiplayer.role == .host {
+                courseProgress(
+                    "参加者がコースを位置合わせ中です",
+                    detail: "完了 \(multiplayer.courseSynchronizedGuestCount)/\(multiplayer.remoteParticipants.count)台"
+                )
+            } else {
+                courseProgress(
+                    "他の参加者の位置合わせを待っています",
+                    detail: "全員が完了すると準備OKに進めます"
+                )
+            }
         case .synchronized:
             Label("同じ実空間にコースを配置しました", systemImage: "arkit")
                 .font(.caption.bold())
@@ -336,12 +378,4 @@ struct PeerRaceLobbyView: View {
         }
     }
 
-    private func readinessLabel(_ title: String, ready: Bool) -> some View {
-        Label(
-            "\(title): \(ready ? "準備OK" : "準備中")",
-            systemImage: ready ? "checkmark.circle.fill" : "circle.dotted"
-        )
-        .font(.caption.bold())
-        .foregroundStyle(ready ? .green : .white.opacity(0.75))
-    }
 }

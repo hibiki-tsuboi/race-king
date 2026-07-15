@@ -31,7 +31,8 @@ struct GameOverlayView: View {
                     onReset: resetRace,
                     onChooseMode: { requestExit(to: .modeSelection) },
                     onReturnToTitle: { requestExit(to: .title) },
-                    onImportedCarChanged: multiplayer.refreshLocalImportedCar
+                    onImportedCarChanged: multiplayer.refreshLocalImportedCar,
+                    peerParticipants: multiplayer.remoteParticipants
                 )
                 Spacer()
                 ControlsView(game: game)
@@ -282,7 +283,7 @@ struct GameOverlayView: View {
                 return "ホストと同じ机・床を映してコースを位置合わせ"
             }
             if multiplayer.isCourseSynchronized {
-                return "共有したコースで2台同時にレースします"
+                return "共有したコースで最大5台同時にレースします"
             }
             return "ホスト側でコースを配置してから共有"
         }
@@ -404,6 +405,7 @@ struct HUDView: View {
     var onChooseMode: () -> Void = {}
     var onReturnToTitle: () -> Void = {}
     var onImportedCarChanged: () -> Void = {}
+    var peerParticipants: [PeerRaceParticipant] = []
     @State private var showingCarImporter = false
     @State private var importSlot: CarImportSlot = .player
     @State private var importErrorMessage: String?
@@ -441,10 +443,18 @@ struct HUDView: View {
                     .font(.system(size: 34, weight: .bold, design: .rounded))
                     .monospacedDigit()
                 if game.mode == .peerRace {
-                    let peerLap = min(game.peerLapCount + 1, RaceGame.raceLapTotal)
-                    Text("相手 LAP \(peerLap)/\(RaceGame.raceLapTotal)")
-                        .font(.caption.bold())
+                    ForEach(peerParticipants) { participant in
+                        let peerLap = min(
+                            game.peerLapCount(for: participant.id) + 1,
+                            RaceGame.raceLapTotal
+                        )
+                        Text(
+                            "#\(participant.slot + 1) \(participant.name)  LAP \(peerLap)/\(RaceGame.raceLapTotal)"
+                        )
+                        .lineLimit(1)
+                        .font(.caption2.bold())
                         .foregroundStyle(.cyan)
+                    }
                 }
                 if game.mode == .timeAttack {
                     if let last = game.lastLapTime {

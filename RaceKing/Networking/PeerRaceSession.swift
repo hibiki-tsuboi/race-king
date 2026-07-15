@@ -8,7 +8,26 @@ import Network
 import Observation
 import UIKit
 
-/// Discovers one nearby opponent over Bonjour and exchanges framed race data.
+private final class PeerConnectionContext {
+    let id = UUID()
+    let connection: NWConnection
+    let rejectionMessage: String?
+    var playerID: UUID?
+    var receiveBuffer = Data()
+
+    init(connection: NWConnection, rejectionMessage: String? = nil) {
+        self.connection = connection
+        self.rejectionMessage = rejectionMessage
+    }
+}
+
+private struct StoredPeerCarModel {
+    let id: UUID
+    let data: Data
+    let flipped: Bool
+}
+
+/// Hosts or joins a nearby room. The host relays traffic for up to four guests.
 @MainActor
 @Observable
 final class PeerRaceSession {
@@ -61,6 +80,7 @@ final class PeerRaceSession {
         }
     }
 
+    static let maximumPlayers = 5
     private static let serviceType = "_anywheregp._tcp"
     private static let maximumPacketSize = 64 * 1024 * 1024
     private static let maximumWorldMapSize = 40 * 1024 * 1024
@@ -68,30 +88,46 @@ final class PeerRaceSession {
     private static let snapshotInterval: TimeInterval = 1.0 / 20.0
     private static let carChoiceDefaultsKey = "peerRaceCarChoice"
 
+    let localPlayerID: UUID
+    private let localPlayerName: String
     private(set) var state: State = .idle
     private(set) var role: Role?
     private(set) var rooms: [Room] = []
-    private(set) var peerName: String?
-    private(set) var localReady = false
-    private(set) var remoteReady = false
+    private(set) var participants: [PeerRaceParticipant]
     private(set) var raceComplete = false
     private(set) var errorMessage: String?
-    private var localCarModelErrorMessage: String?
-    private var remoteCarModelErrorMessage: String?
     private(set) var courseSyncState: CourseSyncState = .unavailable
-    private(set) var localImportedCarAvailable = EntityFactory.hasImportedPlayerCar
-    private(set) var localCarChoice: RaceCarChoice = {
-        let saved = RaceCarChoice(
-            rawValue: UserDefaults.standard.string(forKey: "peerRaceCarChoice") ?? ""
-        ) ?? .green
-        return saved == .imported && !EntityFactory.hasImportedPlayerCar ? .green : saved
-    }()
-    private(set) var remoteCarChoice: RaceCarChoice?
+    private(set) var localImportedCarAvailable: Bool
+    private(set) var localCarChoice: RaceCarChoice
     private(set) var localImportedCarAcknowledged = true
-    private(set) var remoteImportedCarReady = true
+    private var localCarModelErrorMessage: String?
+    private var remoteCarModelErrorMessages: [UUID: String] = [:]
+    private var remoteImportedCarReadyIDs: Set<UUID> = []
+    private var remoteCarModelTransferIDs: [UUID: UUID] = [:]
+    private var modelAcknowledgements: [UUID: Set<UUID>] = [:]
+    private var courseAppliedParticipantIDs: Set<UUID> = []
+    private var currentCourseSyncID: UUID?
+
+    var localReady: Bool {
+        participants.first(where: { $0.id == localPlayerID })?.isReady ?? false
+    }
+
+    var remoteParticipants: [PeerRaceParticipant] {
+        participants.filter { $0.id != localPlayerID }.sorted { $0.slot < $1.slot }
+    }
+
+    var remoteReady: Bool {
+        !remoteParticipants.isEmpty && remoteParticipants.allSatisfy(\.isReady)
+    }
+
+    var allParticipantsReady: Bool {
+        participants.count >= 2 && participants.allSatisfy(\.isReady)
+    }
 
     var carModelErrorMessage: String? {
-        localCarModelErrorMessage ?? remoteCarModelErrorMessage
+        localCarModelErrorMessage
+            ?? remoteCarModelErrorMessages.sorted { $0.key.uuidString < $1.key.uuidString }
+                .first?.value
     }
 
     var availableLocalCarChoices: [RaceCarChoice] {
@@ -101,13 +137,32 @@ final class PeerRaceSession {
     }
 
     var carModelsSynchronized: Bool {
-        (localCarChoice != .imported || localImportedCarAcknowledged)
-            && (remoteCarChoice != .imported || remoteImportedCarReady)
+        switch role {
+        case .host:
+            let requiredIDs = Set(participants.map(\.id))
+            for participant in participants where participant.carChoice == .imported {
+                guard storedCarModels[participant.id] != nil,
+                      requiredIDs.isSubset(
+                        of: modelAcknowledgements[participant.id] ?? []
+                      ) else { return false }
+            }
+            return true
+        case .guest:
+            if localCarChoice == .imported, !localImportedCarAcknowledged {
+                return false
+            }
+            return remoteParticipants.allSatisfy {
+                $0.carChoice != .imported
+                    || remoteImportedCarReadyIDs.contains($0.id)
+            }
+        case nil:
+            return localCarChoice != .imported || localImportedCarAvailable
+        }
     }
 
     var isSynchronizingCarModels: Bool {
         state == .connected
-            && (localCarChoice == .imported || remoteCarChoice == .imported)
+            && participants.contains { $0.carChoice == .imported }
             && !carModelsSynchronized
             && carModelErrorMessage == nil
     }
@@ -115,21 +170,21 @@ final class PeerRaceSession {
     var canStartRace: Bool {
         state == .connected && role == .host
             && courseSyncState == .synchronized
-            && remoteCarChoice != nil
+            && participants.count >= 2
             && carModelsSynchronized
-            && localReady && remoteReady
+            && allParticipantsReady
     }
 
     var isCourseSynchronized: Bool { courseSyncState == .synchronized }
 
     var canSetReady: Bool {
-        state == .connected && isCourseSynchronized
-            && remoteCarChoice != nil && carModelsSynchronized
+        state == .connected && participants.count >= 2
+            && isCourseSynchronized && carModelsSynchronized
     }
 
     var canRequestCourseShare: Bool {
         guard state == .connected, role == .host,
-              remoteCarChoice != nil, carModelsSynchronized else { return false }
+              participants.count >= 2, carModelsSynchronized else { return false }
         switch courseSyncState {
         case .hostPlacement, .failed(_):
             return true
@@ -138,22 +193,26 @@ final class PeerRaceSession {
         }
     }
 
+    var courseSynchronizedGuestCount: Int {
+        courseAppliedParticipantIDs.intersection(Set(remoteParticipants.map(\.id))).count
+    }
+
     var connectionStatusText: String {
         switch state {
         case .idle: "未接続"
         case .hosting: "参加を待っています"
         case .browsing: "ルームを探しています"
         case .connecting: "接続しています"
-        case .connected: "接続済み"
+        case .connected: "接続済み（\(participants.count)/\(Self.maximumPlayers)人）"
         }
     }
 
     @ObservationIgnored var onStartRace: (() -> Void)?
     @ObservationIgnored var onResetRace: (() -> Void)?
-    @ObservationIgnored var onCarState: ((PeerRacePacket.CarState) -> Void)?
+    @ObservationIgnored var onCarState: ((UUID, PeerRacePacket.CarState) -> Void)?
     @ObservationIgnored var onLocalCarChoiceChanged: ((RaceCarChoice) -> Void)?
-    @ObservationIgnored var onRemoteCarChoiceChanged: ((RaceCarChoice?) -> Void)?
-    @ObservationIgnored var onRemoteImportedCarModel: ((Data, Bool, UUID) -> Void)?
+    @ObservationIgnored var onParticipantsChanged: (([PeerRaceParticipant], UUID) -> Void)?
+    @ObservationIgnored var onRemoteImportedCarModel: ((UUID, Data, Bool, UUID) -> Void)?
     @ObservationIgnored var onFinishResult: ((Int, TimeInterval) -> Void)?
     @ObservationIgnored var onConnectionChanged: ((Bool) -> Void)?
     @ObservationIgnored var onCourseMapRequested: (() -> Void)?
@@ -162,27 +221,59 @@ final class PeerRaceSession {
 
     @ObservationIgnored private var listener: NWListener?
     @ObservationIgnored private var browser: NWBrowser?
-    @ObservationIgnored private var connection: NWConnection?
-    @ObservationIgnored private var receiveBuffer = Data()
-    @ObservationIgnored private var snapshotAccumulator: TimeInterval = 0
-    @ObservationIgnored private var localFinished = false
-    @ObservationIgnored private var remoteFinished = false
+    @ObservationIgnored private var connections: [UUID: PeerConnectionContext] = [:]
+    @ObservationIgnored private var hostConnectionID: UUID?
+    @ObservationIgnored private var storedCarModels: [UUID: StoredPeerCarModel] = [:]
     @ObservationIgnored private var localCarModelTransferID: UUID?
-    @ObservationIgnored private var remoteCarModelTransferID: UUID?
+    @ObservationIgnored private var snapshotAccumulator: TimeInterval = 0
+    @ObservationIgnored private var finishOrder: [UUID] = []
+    @ObservationIgnored private var raceInProgress = false
+    @ObservationIgnored private var lastConnectionNotification = false
     @ObservationIgnored private let encoder = JSONEncoder()
     @ObservationIgnored private let decoder = JSONDecoder()
+
+    init() {
+        localPlayerID = UUID()
+        let name = UIDevice.current.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        localPlayerName = String((name.isEmpty ? "iPhone" : name).prefix(40))
+        let importedCarAvailable = EntityFactory.hasImportedPlayerCar
+        localImportedCarAvailable = importedCarAvailable
+        let saved = RaceCarChoice(
+            rawValue: UserDefaults.standard.string(
+                forKey: Self.carChoiceDefaultsKey
+            ) ?? ""
+        ) ?? .green
+        let initialCarChoice: RaceCarChoice = saved == .imported
+            && !importedCarAvailable ? .green : saved
+        localCarChoice = initialCarChoice
+        participants = [PeerRaceParticipant(
+            id: localPlayerID,
+            name: localPlayerName,
+            slot: 0,
+            isReady: false,
+            carChoice: initialCarChoice
+        )]
+        localImportedCarAcknowledged = initialCarChoice != .imported
+    }
+
+    // MARK: - Room lifecycle
 
     func startHosting() {
         disconnect()
         role = .host
         state = .hosting
         errorMessage = nil
+        resetLocalParticipant(slot: 0)
+        resetCourseSyncState()
+        resetCarModelSyncState()
+        prepareHostLocalModelIfNeeded()
 
         do {
             let listener = try NWListener(using: networkParameters())
-            let deviceName = UIDevice.current.name.trimmingCharacters(in: .whitespacesAndNewlines)
-            let roomName = String((deviceName.isEmpty ? "iPhone" : deviceName).prefix(40))
-            listener.service = .init(name: "\(roomName)のレース", type: Self.serviceType)
+            listener.service = .init(
+                name: "\(localPlayerName)のレース",
+                type: Self.serviceType
+            )
             listener.stateUpdateHandler = { [weak self, weak listener] newState in
                 MainActor.assumeIsolated {
                     guard let self, let listener, self.listener === listener else { return }
@@ -197,7 +288,7 @@ final class PeerRaceSession {
             self.listener = listener
             listener.start(queue: .main)
         } catch {
-            fail("ルームを作成できませんでした: \(error.localizedDescription)")
+            failSession("ルームを作成できませんでした: \(error.localizedDescription)")
         }
     }
 
@@ -206,6 +297,8 @@ final class PeerRaceSession {
         role = .guest
         state = .browsing
         errorMessage = nil
+        resetLocalParticipant(slot: 0)
+        resetCourseSyncState()
 
         let browser = NWBrowser(
             for: .bonjour(type: Self.serviceType, domain: nil),
@@ -233,20 +326,67 @@ final class PeerRaceSession {
         browser = nil
         rooms = []
         state = .connecting
-        attach(NWConnection(to: room.endpoint, using: networkParameters()))
+        let context = PeerConnectionContext(
+            connection: NWConnection(to: room.endpoint, using: networkParameters())
+        )
+        hostConnectionID = context.id
+        attach(context)
     }
+
+    func disconnect() {
+        let wasConnected = lastConnectionNotification
+        lastConnectionNotification = false
+        listener?.stateUpdateHandler = nil
+        listener?.newConnectionHandler = nil
+        listener?.cancel()
+        browser?.stateUpdateHandler = nil
+        browser?.browseResultsChangedHandler = nil
+        browser?.cancel()
+        for context in connections.values {
+            context.connection.stateUpdateHandler = nil
+            context.connection.cancel()
+        }
+        listener = nil
+        browser = nil
+        connections.removeAll()
+        hostConnectionID = nil
+        rooms = []
+        role = nil
+        state = .idle
+        raceInProgress = false
+        resetLocalParticipant(slot: 0)
+        resetRoundState()
+        courseSyncState = .unavailable
+        resetCarModelSyncState()
+        if wasConnected {
+            onCourseSyncInvalidated?()
+            onConnectionChanged?(false)
+        }
+        notifyParticipantsChanged()
+    }
+
+    func clearError() {
+        errorMessage = nil
+    }
+
+    // MARK: - Lobby
 
     func setReady(_ ready: Bool) {
-        guard state == .connected else { return }
+        guard state == .connected, !raceInProgress else { return }
         guard !ready || canSetReady else { return }
-        localReady = ready
-        send(.ready(ready))
+        if role == .host {
+            setParticipantReady(localPlayerID, ready: ready)
+            broadcastRoster()
+        } else {
+            setParticipantReady(localPlayerID, ready: ready)
+            notifyParticipantsChanged()
+            _ = sendToHost(.ready(playerID: localPlayerID, isReady: ready))
+        }
     }
 
-    /// Persists the local choice and immediately shares it with a connected peer.
-    /// A car change invalidates this player's previous ready confirmation.
+    /// Persists and shares a car selection. Any change cancels every READY.
     func setLocalCarChoice(_ choice: RaceCarChoice) {
-        guard choice != localCarChoice else { return }
+        guard choice != localCarChoice, !raceInProgress else { return }
         let importedData: Data?
         if choice == .imported {
             do {
@@ -264,73 +404,139 @@ final class PeerRaceSession {
         localCarModelErrorMessage = nil
         localCarModelTransferID = nil
         localImportedCarAcknowledged = choice != .imported || state != .connected
+        updateParticipant(localPlayerID) {
+            $0.carChoice = choice
+            $0.isReady = false
+        }
         onLocalCarChoiceChanged?(choice)
 
-        guard state == .connected else { return }
-        localReady = false
-        send(.carSelection(choice))
-        send(.ready(false))
-        if let importedData {
-            sendLocalImportedCarModel(importedData)
+        switch role {
+        case .host:
+            invalidateAllReady()
+            clearStoredModel(for: localPlayerID)
+            if let importedData { installHostLocalModel(importedData) }
+            broadcastRoster()
+            if importedData != nil { sendStoredModelToAll(for: localPlayerID) }
+        case .guest where state == .connected:
+            notifyParticipantsChanged()
+            _ = sendToHost(.carSelection(playerID: localPlayerID, choice: choice))
+            _ = sendToHost(.ready(playerID: localPlayerID, isReady: false))
+            if let importedData { sendGuestLocalModel(importedData) }
+        default:
+            notifyParticipantsChanged()
         }
     }
 
-    /// Re-evaluates the imported-player file after an import, replacement,
-    /// flip change, or deletion and re-sends it when currently selected.
+    /// Re-sends a replaced or flipped imported model while it is selected.
     func refreshLocalImportedCar() {
         localImportedCarAvailable = EntityFactory.hasImportedPlayerCar
         guard localImportedCarAvailable else {
             localCarModelErrorMessage = nil
-            if localCarChoice == .imported {
-                setLocalCarChoice(.green)
-            }
+            if localCarChoice == .imported { setLocalCarChoice(.green) }
             return
         }
-        guard localCarChoice == .imported else { return }
+        guard localCarChoice == .imported, !raceInProgress else { return }
 
         do {
             let data = try loadLocalImportedCarData()
             localCarModelErrorMessage = nil
             onLocalCarChoiceChanged?(.imported)
-            guard state == .connected else { return }
-            localReady = false
-            send(.ready(false))
-            sendLocalImportedCarModel(data)
+            switch role {
+            case .host:
+                invalidateAllReady()
+                installHostLocalModel(data)
+                broadcastRoster()
+                sendStoredModelToAll(for: localPlayerID)
+            case .guest where state == .connected:
+                setParticipantReady(localPlayerID, ready: false)
+                notifyParticipantsChanged()
+                _ = sendToHost(.ready(playerID: localPlayerID, isReady: false))
+                sendGuestLocalModel(data)
+            default:
+                localImportedCarAcknowledged = true
+            }
         } catch {
             localImportedCarAcknowledged = false
             localCarModelErrorMessage = error.localizedDescription
         }
     }
 
-    func isCurrentRemoteImportedCarModel(id: UUID) -> Bool {
-        state == .connected && remoteCarChoice == .imported
-            && remoteCarModelTransferID == id
+    func isCurrentRemoteImportedCarModel(
+        playerID: UUID, id: UUID
+    ) -> Bool {
+        guard state == .connected,
+              participant(id: playerID)?.carChoice == .imported else { return false }
+        if role == .host {
+            return storedCarModels[playerID]?.id == id
+        }
+        return remoteCarModelTransferIDs[playerID] == id
     }
 
-    /// Called after RealityKit has successfully loaded the received USDZ.
-    func confirmRemoteImportedCarModel(id: UUID) {
-        guard isCurrentRemoteImportedCarModel(id: id) else { return }
-        remoteImportedCarReady = true
-        remoteCarModelErrorMessage = nil
-        send(.carModelReady(id: id))
+    /// Called after RealityKit loads a received participant model.
+    func confirmRemoteImportedCarModel(playerID: UUID, id: UUID) {
+        guard isCurrentRemoteImportedCarModel(playerID: playerID, id: id) else { return }
+        remoteCarModelErrorMessages.removeValue(forKey: playerID)
+        if role == .host {
+            modelAcknowledgements[playerID, default: []].insert(localPlayerID)
+            if let ownerContext = context(for: playerID) {
+                _ = send(
+                    .carModelReady(playerID: playerID, id: id),
+                    to: ownerContext
+                )
+            }
+            sendStoredModelToAll(for: playerID, excluding: [playerID])
+        } else {
+            remoteImportedCarReadyIDs.insert(playerID)
+            _ = sendToHost(.carModelReady(playerID: playerID, id: id))
+        }
     }
 
-    /// Reports a received USDZ that RealityKit could not load.
-    func failRemoteImportedCarModel(id: UUID, message: String) {
-        guard isCurrentRemoteImportedCarModel(id: id) else { return }
+    /// Reports a USDZ that RealityKit could not load on this device.
+    func failRemoteImportedCarModel(
+        playerID: UUID, id: UUID, message: String
+    ) {
+        guard isCurrentRemoteImportedCarModel(playerID: playerID, id: id) else { return }
         let safeMessage = String(message.prefix(160))
-        remoteImportedCarReady = false
-        remoteCarModelErrorMessage = safeMessage
-        send(.carModelFailed(id: id, message: safeMessage))
+        remoteCarModelErrorMessages[playerID] = safeMessage
+        if role == .host {
+            storedCarModels.removeValue(forKey: playerID)
+            modelAcknowledgements.removeValue(forKey: playerID)
+            invalidateAllReady()
+            broadcastRoster()
+            if let ownerContext = context(for: playerID) {
+                _ = send(
+                    .carModelFailed(
+                        playerID: playerID,
+                        id: id,
+                        message: safeMessage
+                    ),
+                    to: ownerContext
+                )
+            }
+        } else {
+            remoteImportedCarReadyIDs.remove(playerID)
+            setParticipantReady(localPlayerID, ready: false)
+            notifyParticipantsChanged()
+            _ = sendToHost(.ready(playerID: localPlayerID, isReady: false))
+            _ = sendToHost(.carModelFailed(
+                playerID: playerID,
+                id: id,
+                message: safeMessage
+            ))
+        }
     }
 
-    /// Starts host-side world-map capture. The view owning ARSession supplies the map.
+    // MARK: - Course sharing
+
     func requestCourseShare() {
         guard canRequestCourseShare else { return }
-        localReady = false
-        remoteReady = false
+        invalidateAllReady()
+        courseAppliedParticipantIDs.removeAll()
+        let syncID = UUID()
+        currentCourseSyncID = syncID
         courseSyncState = .preparingMap
-        send(.courseSyncStarted)
+        broadcastRoster()
+        broadcast(.courseSyncStarted(id: syncID))
         onCourseMapRequested?()
     }
 
@@ -338,105 +544,113 @@ final class PeerRaceSession {
         _ data: Data, placement: PeerRacePacket.CoursePlacement
     ) {
         guard state == .connected, role == .host,
-              courseSyncState == .preparingMap else { return }
+              courseSyncState == .preparingMap,
+              let syncID = currentCourseSyncID else { return }
         guard data.count <= Self.maximumWorldMapSize else {
             failCourseShare("ARマップが大きすぎます。映す範囲を狭めてやり直してください")
             return
         }
-        guard send(.courseMap(data: data, placement: placement)) else {
+        guard broadcast(.courseMap(
+            id: syncID,
+            data: data,
+            placement: placement
+        )) else {
             failCourseShare("コース情報を送信できませんでした")
             return
         }
         courseSyncState = .waitingForGuest
     }
 
-    /// Called by the guest after ARKit has relocalized to the host world map.
     func confirmCourseMapApplied() {
         guard state == .connected, role == .guest,
-              courseSyncState == .relocalizing else { return }
-        courseSyncState = .synchronized
-        send(.courseMapApplied)
+              courseSyncState == .relocalizing,
+              let syncID = currentCourseSyncID else { return }
+        courseSyncState = .waitingForGuest
+        _ = sendToHost(.courseMapApplied(id: syncID))
     }
 
     func failCourseShare(_ message: String) {
-        guard state == .connected else { return }
+        guard state == .connected, currentCourseSyncID != nil else { return }
+        switch role {
+        case .host:
+            guard courseSyncState == .preparingMap
+                    || courseSyncState == .waitingForGuest else { return }
+        case .guest:
+            guard courseSyncState == .waitingForMap
+                    || courseSyncState == .relocalizing else { return }
+        case nil:
+            return
+        }
         let safeMessage = String(message.prefix(160))
-        localReady = false
-        remoteReady = false
+        setParticipantReady(localPlayerID, ready: false)
         courseSyncState = .failed(safeMessage)
-        send(.courseMapFailed(safeMessage))
+        if role == .host {
+            invalidateAllReady()
+            broadcastRoster()
+            broadcast(.courseMapFailed(
+                id: currentCourseSyncID,
+                message: safeMessage
+            ))
+        } else {
+            notifyParticipantsChanged()
+            _ = sendToHost(.ready(playerID: localPlayerID, isReady: false))
+            _ = sendToHost(.courseMapFailed(
+                id: currentCourseSyncID,
+                message: safeMessage
+            ))
+        }
         onCourseSyncInvalidated?()
     }
 
+    // MARK: - Race
+
     func requestStartRace() {
         guard canStartRace else { return }
+        raceInProgress = true
         resetFinishState()
-        send(.startRace)
+        broadcast(.startRace)
         onStartRace?()
     }
 
     func requestResetRace() {
         guard state == .connected else { return }
-        resetRoundState()
-        send(.resetRace)
-        onResetRace?()
-    }
-
-    func sendCarState(_ carState: PeerRacePacket.CarState, deltaTime: TimeInterval) {
-        guard state == .connected, isCourseSynchronized else { return }
-        snapshotAccumulator += deltaTime
-        guard snapshotAccumulator >= Self.snapshotInterval else { return }
-        snapshotAccumulator.formTruncatingRemainder(dividingBy: Self.snapshotInterval)
-        send(.carState(carState))
-    }
-
-    /// The host decides finishing order according to the order finish messages arrive.
-    func reportLocalFinish(raceTime: TimeInterval) {
-        guard state == .connected, !localFinished else { return }
-        localFinished = true
         if role == .host {
-            onFinishResult?(remoteFinished ? 2 : 1, raceTime)
-            completeRaceIfNeeded()
+            performHostReset()
         } else {
-            send(.finish(raceTime: raceTime))
+            _ = sendToHost(.resetRace)
         }
     }
 
-    func clearError() {
-        errorMessage = nil
+    func sendCarState(
+        _ carState: PeerRacePacket.CarState, deltaTime: TimeInterval
+    ) {
+        guard state == .connected, isCourseSynchronized, raceInProgress else { return }
+        snapshotAccumulator += deltaTime
+        guard snapshotAccumulator >= Self.snapshotInterval else { return }
+        snapshotAccumulator.formTruncatingRemainder(
+            dividingBy: Self.snapshotInterval
+        )
+        let packet = PeerRacePacket.carState(
+            playerID: localPlayerID,
+            state: carState
+        )
+        if role == .host {
+            broadcast(packet)
+        } else {
+            _ = sendToHost(packet)
+        }
     }
 
-    func disconnect() {
-        let wasConnected = state == .connected || state == .connecting
-        listener?.stateUpdateHandler = nil
-        listener?.newConnectionHandler = nil
-        listener?.cancel()
-        browser?.stateUpdateHandler = nil
-        browser?.browseResultsChangedHandler = nil
-        browser?.cancel()
-        connection?.stateUpdateHandler = nil
-        connection?.cancel()
-        listener = nil
-        browser = nil
-        connection = nil
-        receiveBuffer.removeAll(keepingCapacity: true)
-        rooms = []
-        peerName = nil
-        localCarModelTransferID = nil
-        remoteCarModelTransferID = nil
-        localImportedCarAcknowledged = localCarChoice != .imported
-        remoteImportedCarReady = true
-        localCarModelErrorMessage = nil
-        remoteCarModelErrorMessage = nil
-        remoteCarChoice = nil
-        onRemoteCarChoiceChanged?(nil)
-        role = nil
-        state = .idle
-        courseSyncState = .unavailable
-        resetRoundState()
-        if wasConnected {
-            onCourseSyncInvalidated?()
-            onConnectionChanged?(false)
+    func reportLocalFinish(raceTime: TimeInterval) {
+        guard state == .connected, raceInProgress,
+              !finishOrder.contains(localPlayerID) else { return }
+        if role == .host {
+            recordFinish(playerID: localPlayerID, raceTime: raceTime)
+        } else {
+            _ = sendToHost(.finish(
+                playerID: localPlayerID,
+                raceTime: raceTime
+            ))
         }
     }
 
@@ -452,9 +666,9 @@ final class PeerRaceSession {
     private func handleListenerState(_ newState: NWListener.State) {
         switch newState {
         case .ready:
-            state = .hosting
+            if remoteParticipants.isEmpty { state = .hosting }
         case .failed(let error):
-            fail("ルームを公開できませんでした: \(error.localizedDescription)")
+            failSession("ルームを公開できませんでした: \(error.localizedDescription)")
         case .cancelled:
             break
         default:
@@ -467,7 +681,7 @@ final class PeerRaceSession {
         case .ready:
             state = .browsing
         case .failed(let error):
-            fail("ルームを検索できませんでした: \(error.localizedDescription)")
+            failSession("ルームを検索できませんでした: \(error.localizedDescription)")
         case .cancelled:
             break
         default:
@@ -483,303 +697,761 @@ final class PeerRaceSession {
         .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
     }
 
-    private func accept(_ newConnection: NWConnection) {
-        guard role == .host, connection == nil else {
-            newConnection.cancel()
+    private func accept(_ connection: NWConnection) {
+        guard role == .host else {
+            connection.cancel()
             return
         }
-        listener?.stateUpdateHandler = nil
-        listener?.newConnectionHandler = nil
-        listener?.cancel()
-        listener = nil
-        state = .connecting
-        attach(newConnection)
+        let message: String?
+        if raceInProgress {
+            message = "レース中のルームには参加できません"
+        } else if connections.count >= Self.maximumPlayers - 1 {
+            message = "このルームは満員です"
+        } else {
+            message = nil
+        }
+        attach(PeerConnectionContext(
+            connection: connection,
+            rejectionMessage: message
+        ))
     }
 
-    private func attach(_ newConnection: NWConnection) {
-        connection = newConnection
-        receiveBuffer.removeAll(keepingCapacity: true)
-        newConnection.stateUpdateHandler = { [weak self, weak newConnection] newState in
+    private func attach(_ context: PeerConnectionContext) {
+        connections[context.id] = context
+        context.connection.stateUpdateHandler = { [weak self, weak context] newState in
             MainActor.assumeIsolated {
-                guard let self, let newConnection,
-                      self.connection === newConnection else { return }
-                self.handleConnectionState(newState, connection: newConnection)
+                guard let self, let context,
+                      self.connections[context.id] != nil else { return }
+                self.handleConnectionState(newState, context: context)
             }
         }
-        newConnection.start(queue: .main)
+        context.connection.start(queue: .main)
     }
 
     private func handleConnectionState(
-        _ newState: NWConnection.State, connection: NWConnection
+        _ newState: NWConnection.State, context: PeerConnectionContext
     ) {
         switch newState {
         case .ready:
-            state = .connected
-            errorMessage = nil
-            resetRoundState()
-            resetCourseSyncState()
-            resetCarModelSyncState()
-            receiveNextChunk(from: connection)
-            send(.hello(name: UIDevice.current.name, carChoice: localCarChoice))
-            if localCarChoice == .imported {
-                sendLocalImportedCarModel()
+            if let rejectionMessage = context.rejectionMessage {
+                _ = send(.joinRejected(rejectionMessage), to: context)
+                Task { [weak self, weak context] in
+                    try? await Task.sleep(for: .milliseconds(300))
+                    guard let self, let context else { return }
+                    self.close(context)
+                }
+                return
             }
-            onConnectionChanged?(true)
+            receiveNextChunk(from: context)
+            if role == .guest {
+                state = .connected
+                resetRoundState()
+                resetCourseSyncState()
+                resetCarModelSyncState()
+                _ = sendToHost(.hello(
+                    playerID: localPlayerID,
+                    name: localPlayerName,
+                    carChoice: localCarChoice
+                ))
+                if localCarChoice == .imported { sendGuestLocalModel() }
+            }
         case .failed(let error):
-            fail("対戦相手との接続が切れました: \(error.localizedDescription)")
+            connectionLost(
+                context,
+                message: "対戦接続が切れました: \(error.localizedDescription)"
+            )
         case .cancelled:
-            if self.connection === connection {
-                fail("対戦相手との接続が切れました")
-            }
+            connectionLost(context, message: "対戦接続が終了しました")
         default:
             break
         }
     }
 
-    private func fail(_ message: String) {
-        errorMessage = message
+    private func connectionLost(
+        _ context: PeerConnectionContext, message: String
+    ) {
+        guard connections[context.id] != nil else { return }
+        let departedID = context.playerID
+        close(context)
+        if role == .guest {
+            failSession(message)
+            return
+        }
+        guard role == .host, let departedID else { return }
+        let departedName = participant(id: departedID)?.name ?? "参加者"
+        participants.removeAll { $0.id == departedID }
+        clearStoredModel(for: departedID)
+        remoteImportedCarReadyIDs.remove(departedID)
+        remoteCarModelTransferIDs.removeValue(forKey: departedID)
+        remoteCarModelErrorMessages.removeValue(forKey: departedID)
+        let departedErrorPrefix = "\(departedName):"
+        remoteCarModelErrorMessages = remoteCarModelErrorMessages.filter {
+            !$0.value.hasPrefix(departedErrorPrefix)
+        }
+        if localCarModelErrorMessage?.hasPrefix(departedErrorPrefix) == true {
+            localCarModelErrorMessage = nil
+        }
+        acknowledgeModelsSynchronizedAfterDeparture()
+        if remoteParticipants.isEmpty { state = .hosting }
+        let shouldAbortRace = raceInProgress && remoteParticipants.isEmpty
+        if shouldAbortRace {
+            raceInProgress = false
+            resetRoundState()
+            courseAppliedParticipantIDs.removeAll()
+            currentCourseSyncID = nil
+            courseSyncState = .hostPlacement
+        } else if !raceInProgress {
+            invalidateCourseForRosterChange()
+        }
+        broadcastRoster()
+        if shouldAbortRace {
+            onCourseSyncInvalidated?()
+            onResetRace?()
+        } else if raceInProgress {
+            completeRaceIfNeeded()
+        }
+        errorMessage = "\(departedName)が退出しました"
+    }
+
+    private func close(_ context: PeerConnectionContext) {
+        guard connections.removeValue(forKey: context.id) != nil else { return }
+        context.connection.stateUpdateHandler = nil
+        context.connection.cancel()
+        if hostConnectionID == context.id { hostConnectionID = nil }
+    }
+
+    private func failSession(_ message: String) {
         disconnect()
         errorMessage = message
     }
 
-    // MARK: - Framing and protocol
+    // MARK: - Framing
 
     @discardableResult
-    private func send(_ packet: PeerRacePacket) -> Bool {
-        guard state == .connected, let connection else { return false }
+    private func send(
+        _ packet: PeerRacePacket, to context: PeerConnectionContext
+    ) -> Bool {
+        guard let frame = encodedFrame(for: packet) else { return false }
+        return sendFrame(frame, to: context)
+    }
+
+    private func encodedFrame(for packet: PeerRacePacket) -> Data? {
         do {
             let payload = try encoder.encode(packet)
-            guard payload.count <= Self.maximumPacketSize else { return false }
+            guard payload.count <= Self.maximumPacketSize else { return nil }
             var length = UInt32(payload.count).bigEndian
             var frame = Data(bytes: &length, count: MemoryLayout<UInt32>.size)
             frame.append(payload)
-            connection.send(content: frame, completion: .contentProcessed { [weak self, weak connection] error in
-                guard let error else { return }
-                MainActor.assumeIsolated {
-                    guard let self, let connection,
-                          self.connection === connection else { return }
-                    self.fail("データを送信できませんでした: \(error.localizedDescription)")
-                }
-            })
-            return true
+            return frame
         } catch {
-            fail("対戦データを作成できませんでした: \(error.localizedDescription)")
-            return false
+            if role == .guest {
+                failSession("対戦データを作成できませんでした: \(error.localizedDescription)")
+            }
+            return nil
         }
     }
 
-    private func receiveNextChunk(from connection: NWConnection) {
-        connection.receive(
-            minimumIncompleteLength: 1,
-            maximumLength: 64 * 1024
-        ) { [weak self, weak connection] content, _, isComplete, error in
-            MainActor.assumeIsolated {
-                guard let self, let connection,
-                      self.connection === connection else { return }
-                if let content { self.receiveBuffer.append(content) }
-                guard self.consumeFrames() else { return }
-                if let error {
-                    self.fail("対戦データを受信できませんでした: \(error.localizedDescription)")
-                } else if isComplete {
-                    self.fail("対戦相手との接続が終了しました")
-                } else {
-                    self.receiveNextChunk(from: connection)
+    private func sendFrame(
+        _ frame: Data, to context: PeerConnectionContext
+    ) -> Bool {
+        guard connections[context.id] != nil else { return false }
+        context.connection.send(
+            content: frame,
+            completion: .contentProcessed { [weak self, weak context] error in
+                guard let error else { return }
+                MainActor.assumeIsolated {
+                    guard let self, let context,
+                          self.connections[context.id] != nil else { return }
+                    self.connectionLost(
+                        context,
+                        message: "データを送信できませんでした: \(error.localizedDescription)"
+                    )
                 }
             }
-        }
+        )
+        return true
     }
 
     @discardableResult
-    private func consumeFrames() -> Bool {
+    private func sendToHost(_ packet: PeerRacePacket) -> Bool {
+        guard let hostConnectionID,
+              let context = connections[hostConnectionID] else { return false }
+        return send(packet, to: context)
+    }
+
+    @discardableResult
+    private func broadcast(
+        _ packet: PeerRacePacket, excluding excludedIDs: Set<UUID> = []
+    ) -> Bool {
+        let targets = connections.values.filter {
+            guard let playerID = $0.playerID else { return false }
+            return !excludedIDs.contains(playerID)
+        }
+        guard !targets.isEmpty else { return false }
+        guard let frame = encodedFrame(for: packet) else { return false }
+        return targets.reduce(true) { result, context in
+            sendFrame(frame, to: context) && result
+        }
+    }
+
+    private func receiveNextChunk(from context: PeerConnectionContext) {
+        context.connection.receive(
+            minimumIncompleteLength: 1,
+            maximumLength: 64 * 1024
+        ) { [weak self, weak context] content, _, isComplete, error in
+            MainActor.assumeIsolated {
+                guard let self, let context,
+                      self.connections[context.id] != nil else { return }
+                if let content { context.receiveBuffer.append(content) }
+                guard self.consumeFrames(from: context) else { return }
+                if let error {
+                    self.connectionLost(
+                        context,
+                        message: "対戦データを受信できませんでした: \(error.localizedDescription)"
+                    )
+                } else if isComplete {
+                    self.connectionLost(context, message: "対戦接続が終了しました")
+                } else {
+                    self.receiveNextChunk(from: context)
+                }
+            }
+        }
+    }
+
+    private func consumeFrames(from context: PeerConnectionContext) -> Bool {
         let headerSize = MemoryLayout<UInt32>.size
-        while receiveBuffer.count >= headerSize {
-            let length = receiveBuffer.prefix(headerSize).reduce(UInt32(0)) {
+        while context.receiveBuffer.count >= headerSize {
+            let length = context.receiveBuffer.prefix(headerSize).reduce(UInt32(0)) {
                 ($0 << 8) | UInt32($1)
             }
             guard length > 0, length <= Self.maximumPacketSize else {
-                fail("不正な対戦データを受信しました")
+                connectionLost(context, message: "不正な対戦データを受信しました")
                 return false
             }
             let frameSize = headerSize + Int(length)
-            guard receiveBuffer.count >= frameSize else { return true }
-            let payload = receiveBuffer.subdata(in: headerSize..<frameSize)
-            receiveBuffer.removeSubrange(0..<frameSize)
+            guard context.receiveBuffer.count >= frameSize else { return true }
+            let payload = context.receiveBuffer.subdata(in: headerSize..<frameSize)
+            context.receiveBuffer.removeSubrange(0..<frameSize)
             do {
-                handle(try decoder.decode(PeerRacePacket.self, from: payload))
+                let packet = try decoder.decode(PeerRacePacket.self, from: payload)
+                if role == .host {
+                    handleHostPacket(packet, from: context)
+                } else {
+                    handleGuestPacket(packet)
+                }
             } catch {
-                fail("対戦データを読み取れませんでした: \(error.localizedDescription)")
+                connectionLost(
+                    context,
+                    message: "対戦データを読み取れませんでした: \(error.localizedDescription)"
+                )
                 return false
             }
         }
         return true
     }
 
-    private func handle(_ packet: PeerRacePacket) {
+    // MARK: - Host packet handling
+
+    private func handleHostPacket(
+        _ packet: PeerRacePacket, from context: PeerConnectionContext
+    ) {
+        if packet.kind == .hello {
+            receiveGuestHello(packet, from: context)
+            return
+        }
+        guard let senderID = context.playerID,
+              participant(id: senderID) != nil else { return }
+
         switch packet.kind {
-        case .hello:
-            guard packet.protocolVersion == PeerRacePacket.currentVersion else {
-                fail("アプリのバージョンが対戦相手と一致しません")
-                return
-            }
-            guard let carChoice = packet.carChoice else {
-                fail("対戦相手の車情報を読み取れませんでした")
-                return
-            }
-            peerName = packet.name?.isEmpty == false ? packet.name : "対戦相手"
-            receiveRemoteCarChoice(carChoice)
         case .ready:
-            if let isReady = packet.isReady,
-               !isReady || (isCourseSynchronized && remoteCarChoice != nil
-                   && carModelsSynchronized) {
-                remoteReady = isReady
+            guard !raceInProgress,
+                  packet.playerID == senderID,
+                  let ready = packet.isReady else { return }
+            let accepted = !ready || (
+                courseSyncState == .synchronized && carModelsSynchronized
+            )
+            if accepted { setParticipantReady(senderID, ready: ready) }
+            broadcastRoster()
+        case .carSelection:
+            guard !raceInProgress, packet.playerID == senderID,
+                  let choice = packet.carChoice else { return }
+            receiveGuestCarChoice(choice, playerID: senderID)
+        case .carModel:
+            guard !raceInProgress, packet.playerID == senderID else { return }
+            receiveCarModel(packet, ownerID: senderID)
+        case .carModelReady:
+            guard let ownerID = packet.playerID,
+                  let modelID = packet.carModelID,
+                  ownerID != senderID,
+                  storedCarModels[ownerID]?.id == modelID else { return }
+            modelAcknowledgements[ownerID, default: []].insert(senderID)
+        case .carModelFailed:
+            guard let ownerID = packet.playerID,
+                  let modelID = packet.carModelID,
+                  ownerID != senderID,
+                  storedCarModels[ownerID]?.id == modelID else { return }
+            receiveViewerModelFailure(
+                viewerID: senderID,
+                ownerID: ownerID,
+                modelID: modelID,
+                message: packet.message
+            )
+        case .courseMapApplied:
+            guard courseSyncState == .waitingForGuest,
+                  packet.courseSyncID == currentCourseSyncID else { return }
+            courseAppliedParticipantIDs.insert(senderID)
+            let guestIDs = Set(remoteParticipants.map(\.id))
+            if guestIDs.isSubset(of: courseAppliedParticipantIDs),
+               let syncID = currentCourseSyncID {
+                courseSyncState = .synchronized
+                broadcast(.courseSyncCompleted(id: syncID))
             }
+        case .courseMapFailed:
+            guard courseSyncState == .waitingForGuest,
+                  packet.courseSyncID == currentCourseSyncID else { return }
+            let name = participant(id: senderID)?.name ?? "参加者"
+            hostCourseFailure(
+                "\(name): \(packet.message ?? "コースの位置合わせに失敗しました")"
+            )
+        case .carState:
+            guard raceInProgress, isCourseSynchronized,
+                  packet.playerID == senderID,
+                  let carState = packet.carState else { return }
+            onCarState?(senderID, carState)
+            broadcast(
+                .carState(playerID: senderID, state: carState),
+                excluding: [senderID]
+            )
+        case .finish:
+            guard packet.playerID == senderID,
+                  let raceTime = packet.raceTime else { return }
+            recordFinish(playerID: senderID, raceTime: raceTime)
+        case .resetRace:
+            performHostReset()
+        case .hello, .roster, .joinRejected, .courseSyncReset,
+             .courseSyncStarted, .courseMap, .courseSyncCompleted,
+             .startRace, .finishResult, .raceComplete:
+            break
+        }
+    }
+
+    private func receiveGuestHello(
+        _ packet: PeerRacePacket, from context: PeerConnectionContext
+    ) {
+        guard context.playerID == nil else { return }
+        guard packet.protocolVersion == PeerRacePacket.currentVersion else {
+            reject(context, message: "アプリのバージョンが対戦相手と一致しません")
+            return
+        }
+        guard !raceInProgress,
+              participants.count < Self.maximumPlayers,
+              let playerID = packet.playerID,
+              playerID != localPlayerID,
+              participant(id: playerID) == nil,
+              let carChoice = packet.carChoice else {
+            reject(context, message: "このルームには参加できません")
+            return
+        }
+        let usedSlots = Set(participants.map(\.slot))
+        guard let slot = (1..<Self.maximumPlayers).first(
+            where: { !usedSlots.contains($0) }
+        ) else {
+            reject(context, message: "このルームは満員です")
+            return
+        }
+
+        context.playerID = playerID
+        errorMessage = nil
+        let rawName = packet.name?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = String((rawName?.isEmpty == false ? rawName! : "参加者").prefix(40))
+        participants.append(PeerRaceParticipant(
+            id: playerID,
+            name: name,
+            slot: slot,
+            isReady: false,
+            carChoice: carChoice
+        ))
+        if carChoice == .imported {
+            clearStoredModel(for: playerID)
+        }
+        state = .connected
+        invalidateAllReady()
+        let courseNeedsReset = courseSyncState != .hostPlacement
+        if courseNeedsReset {
+            courseAppliedParticipantIDs.removeAll()
+            currentCourseSyncID = nil
+            courseSyncState = .hostPlacement
+        }
+        broadcastRoster()
+        if courseNeedsReset {
+            broadcast(.courseSyncReset)
+            onCourseSyncInvalidated?()
+        }
+        sendStoredModels(to: context)
+    }
+
+    private func reject(
+        _ context: PeerConnectionContext, message: String
+    ) {
+        _ = send(.joinRejected(message), to: context)
+        Task { [weak self, weak context] in
+            try? await Task.sleep(for: .milliseconds(300))
+            guard let self, let context else { return }
+            self.close(context)
+        }
+    }
+
+    private func receiveGuestCarChoice(
+        _ choice: RaceCarChoice, playerID: UUID
+    ) {
+        updateParticipant(playerID) {
+            $0.carChoice = choice
+            $0.isReady = false
+        }
+        invalidateAllReady()
+        clearStoredModel(for: playerID)
+        remoteCarModelErrorMessages.removeValue(forKey: playerID)
+        broadcastRoster()
+    }
+
+    // MARK: - Guest packet handling
+
+    private func handleGuestPacket(_ packet: PeerRacePacket) {
+        switch packet.kind {
+        case .roster:
+            guard let roster = packet.participants else { return }
+            receiveRoster(roster)
+        case .joinRejected:
+            failSession(packet.message ?? "ルームに参加できませんでした")
+        case .courseSyncReset:
+            setParticipantReady(localPlayerID, ready: false)
+            currentCourseSyncID = nil
+            courseSyncState = .waitingForHost
+            notifyParticipantsChanged()
+            onCourseSyncInvalidated?()
         case .courseSyncStarted:
-            guard role == .guest else { return }
-            switch courseSyncState {
-            case .waitingForHost, .failed(_):
-                break
-            default:
-                return
-            }
-            localReady = false
-            remoteReady = false
+            guard courseSyncState == .waitingForHost
+                    || isCourseSynchronized
+                    || isCourseFailure,
+                  let syncID = packet.courseSyncID else { return }
+            setParticipantReady(localPlayerID, ready: false)
+            currentCourseSyncID = syncID
             courseSyncState = .waitingForMap
-            send(.ready(false))
+            notifyParticipantsChanged()
+            _ = sendToHost(.ready(playerID: localPlayerID, isReady: false))
             onCourseSyncInvalidated?()
         case .courseMap:
-            guard role == .guest,
-                  courseSyncState == .waitingForMap else { return }
+            guard courseSyncState == .waitingForMap,
+                  packet.courseSyncID == currentCourseSyncID else { return }
             guard let data = packet.worldMapData,
                   data.count <= Self.maximumWorldMapSize,
                   let placement = packet.coursePlacement else {
                 failCourseShare("コース情報を読み取れませんでした")
                 return
             }
-            localReady = false
-            remoteReady = false
             courseSyncState = .relocalizing
             guard let onCourseMapReceived else {
                 failCourseShare("ARコースを読み込めませんでした")
                 return
             }
             onCourseMapReceived(data, placement)
-        case .courseMapApplied:
-            guard role == .host,
-                  courseSyncState == .waitingForGuest else { return }
-            courseSyncState = .synchronized
         case .courseMapFailed:
-            guard !isCourseSynchronized else { return }
+            guard packet.courseSyncID == currentCourseSyncID else { return }
             let message = String(
                 (packet.message ?? "コースの位置合わせに失敗しました").prefix(160)
             )
-            localReady = false
-            remoteReady = false
+            setParticipantReady(localPlayerID, ready: false)
             courseSyncState = .failed(message)
+            notifyParticipantsChanged()
             onCourseSyncInvalidated?()
-        case .carSelection:
-            guard let carChoice = packet.carChoice else { return }
-            receiveRemoteCarChoice(carChoice)
+        case .courseSyncCompleted:
+            guard courseSyncState == .waitingForGuest,
+                  packet.courseSyncID == currentCourseSyncID else { return }
+            courseSyncState = .synchronized
         case .carModel:
-            guard remoteCarChoice == .imported else { return }
-            guard let id = packet.carModelID,
-                  let data = packet.carModelData,
-                  let flipped = packet.carModelFlipped else {
-                fail("不正なカスタム車データを受信しました")
-                return
-            }
-            guard isValidUSDZ(data), data.count <= Self.maximumCarModelSize else {
-                rejectRemoteCarModel(
-                    id: id,
-                    message: data.count > Self.maximumCarModelSize
-                        ? "相手のカスタム車が12MBを超えています"
-                        : "相手のカスタム車を読み取れません"
-                )
-                return
-            }
-            remoteReady = false
-            remoteImportedCarReady = false
-            remoteCarModelTransferID = id
-            remoteCarModelErrorMessage = nil
-            guard let onRemoteImportedCarModel else {
-                rejectRemoteCarModel(id: id, message: "カスタム車を読み込めません")
-                return
-            }
-            onRemoteImportedCarModel(data, flipped, id)
+            guard let ownerID = packet.playerID,
+                  ownerID != localPlayerID else { return }
+            receiveCarModel(packet, ownerID: ownerID)
         case .carModelReady:
-            guard localCarChoice == .imported,
+            guard packet.playerID == localPlayerID,
                   let id = packet.carModelID,
                   id == localCarModelTransferID else { return }
             localImportedCarAcknowledged = true
-            localCarModelTransferID = nil
             localCarModelErrorMessage = nil
         case .carModelFailed:
-            guard localCarChoice == .imported,
+            guard packet.playerID == localPlayerID,
                   let id = packet.carModelID,
                   id == localCarModelTransferID else { return }
             localImportedCarAcknowledged = false
-            localReady = false
+            setParticipantReady(localPlayerID, ready: false)
             localCarModelErrorMessage = String(
-                (packet.message ?? "相手の端末でカスタム車を読み込めませんでした").prefix(160)
+                (packet.message ?? "別の端末でカスタム車を読み込めませんでした").prefix(160)
             )
+            notifyParticipantsChanged()
         case .startRace:
-            guard role == .guest, isCourseSynchronized,
-                  remoteCarChoice != nil, carModelsSynchronized else { return }
+            guard isCourseSynchronized, carModelsSynchronized,
+                  participants.count >= 2 else { return }
+            raceInProgress = true
             resetFinishState()
             onStartRace?()
         case .carState:
-            if isCourseSynchronized, let carState = packet.carState {
-                onCarState?(carState)
-            }
-        case .finish:
-            guard role == .host, !remoteFinished,
-                  let raceTime = packet.raceTime else { return }
-            remoteFinished = true
-            let remotePosition = localFinished ? 2 : 1
-            send(.finishResult(position: remotePosition, raceTime: raceTime))
-            completeRaceIfNeeded()
+            guard raceInProgress, isCourseSynchronized,
+                  let playerID = packet.playerID,
+                  playerID != localPlayerID,
+                  participant(id: playerID) != nil,
+                  let carState = packet.carState else { return }
+            onCarState?(playerID, carState)
         case .finishResult:
-            guard role == .guest, let position = packet.position,
+            guard packet.playerID == localPlayerID,
+                  let position = packet.position,
                   let raceTime = packet.raceTime else { return }
+            if !finishOrder.contains(localPlayerID) { finishOrder.append(localPlayerID) }
             onFinishResult?(position, raceTime)
         case .raceComplete:
-            guard role == .guest else { return }
             raceComplete = true
         case .resetRace:
+            raceInProgress = false
             resetRoundState()
             onResetRace?()
+        case .hello, .ready, .carSelection, .courseMapApplied, .finish:
+            break
         }
     }
 
-    private func receiveRemoteCarChoice(_ choice: RaceCarChoice) {
-        remoteCarModelTransferID = nil
-        remoteImportedCarReady = choice != .imported
-        remoteCarModelErrorMessage = nil
-        remoteCarChoice = choice
-        remoteReady = false
-        onRemoteCarChoiceChanged?(choice)
+    private var isCourseFailure: Bool {
+        if case .failed = courseSyncState { return true }
+        return false
     }
 
-    private func sendLocalImportedCarModel(_ suppliedData: Data? = nil) {
-        guard state == .connected, localCarChoice == .imported else { return }
+    private func receiveRoster(_ roster: [PeerRaceParticipant]) {
+        guard roster.count >= 2, roster.count <= Self.maximumPlayers,
+              Set(roster.map(\.id)).count == roster.count,
+              Set(roster.map(\.slot)).count == roster.count,
+              roster.allSatisfy({ (0..<Self.maximumPlayers).contains($0.slot) }),
+              let local = roster.first(where: { $0.id == localPlayerID }) else {
+            failSession("参加者情報を読み取れませんでした")
+            return
+        }
+
+        let oldByID = Dictionary(uniqueKeysWithValues: participants.map { ($0.id, $0) })
+        let newRemoteIDs = Set(roster.map(\.id)).subtracting([localPlayerID])
+        remoteImportedCarReadyIDs.formIntersection(newRemoteIDs)
+        remoteCarModelTransferIDs = remoteCarModelTransferIDs.filter {
+            newRemoteIDs.contains($0.key)
+        }
+        remoteCarModelErrorMessages = remoteCarModelErrorMessages.filter {
+            newRemoteIDs.contains($0.key)
+        }
+        for participant in roster where participant.id != localPlayerID {
+            let oldChoice = oldByID[participant.id]?.carChoice
+            if participant.carChoice != .imported {
+                remoteImportedCarReadyIDs.remove(participant.id)
+                remoteCarModelTransferIDs.removeValue(forKey: participant.id)
+                remoteCarModelErrorMessages.removeValue(forKey: participant.id)
+            } else if oldChoice != .imported {
+                remoteImportedCarReadyIDs.remove(participant.id)
+                remoteCarModelTransferIDs.removeValue(forKey: participant.id)
+            }
+        }
+        participants = roster.sorted { $0.slot < $1.slot }
+        if local.carChoice != localCarChoice {
+            localCarChoice = local.carChoice
+            onLocalCarChoiceChanged?(local.carChoice)
+        }
+        notifyParticipantsChanged()
+    }
+
+    // MARK: - Imported models
+
+    private func receiveCarModel(
+        _ packet: PeerRacePacket, ownerID: UUID
+    ) {
+        guard participant(id: ownerID)?.carChoice == .imported,
+              let id = packet.carModelID,
+              let data = packet.carModelData,
+              let flipped = packet.carModelFlipped else { return }
+        guard isValidUSDZ(data), data.count <= Self.maximumCarModelSize else {
+            rejectRemoteCarModel(
+                ownerID: ownerID,
+                id: id,
+                message: data.count > Self.maximumCarModelSize
+                    ? "カスタム車が12MBを超えています"
+                    : "カスタム車を読み取れません"
+            )
+            return
+        }
+
+        remoteCarModelErrorMessages.removeValue(forKey: ownerID)
+        if role == .host {
+            storedCarModels[ownerID] = StoredPeerCarModel(
+                id: id, data: data, flipped: flipped
+            )
+            modelAcknowledgements[ownerID] = [ownerID]
+            invalidateAllReady()
+            broadcastRoster()
+        } else {
+            remoteCarModelTransferIDs[ownerID] = id
+            remoteImportedCarReadyIDs.remove(ownerID)
+            setParticipantReady(localPlayerID, ready: false)
+            notifyParticipantsChanged()
+            _ = sendToHost(.ready(playerID: localPlayerID, isReady: false))
+        }
+        guard let onRemoteImportedCarModel else {
+            rejectRemoteCarModel(
+                ownerID: ownerID,
+                id: id,
+                message: "カスタム車を読み込めません"
+            )
+            return
+        }
+        onRemoteImportedCarModel(ownerID, data, flipped, id)
+    }
+
+    private func rejectRemoteCarModel(
+        ownerID: UUID, id: UUID, message: String
+    ) {
+        let safeMessage = String(message.prefix(160))
+        remoteCarModelErrorMessages[ownerID] = safeMessage
+        if role == .host {
+            clearStoredModel(for: ownerID)
+            invalidateAllReady()
+            broadcastRoster()
+            if let ownerContext = context(for: ownerID) {
+                _ = send(
+                    .carModelFailed(
+                        playerID: ownerID,
+                        id: id,
+                        message: safeMessage
+                    ),
+                    to: ownerContext
+                )
+            }
+        } else {
+            remoteImportedCarReadyIDs.remove(ownerID)
+            setParticipantReady(localPlayerID, ready: false)
+            notifyParticipantsChanged()
+            _ = sendToHost(.ready(playerID: localPlayerID, isReady: false))
+            _ = sendToHost(.carModelFailed(
+                playerID: ownerID,
+                id: id,
+                message: safeMessage
+            ))
+        }
+    }
+
+    private func receiveViewerModelFailure(
+        viewerID: UUID,
+        ownerID: UUID,
+        modelID: UUID,
+        message: String?
+    ) {
+        modelAcknowledgements[ownerID]?.remove(viewerID)
+        setParticipantReady(viewerID, ready: false)
+        let viewerName = participant(id: viewerID)?.name ?? "別の端末"
+        let safeMessage = String(
+            "\(viewerName): \(message ?? "カスタム車を読み込めませんでした")".prefix(160)
+        )
+        remoteCarModelErrorMessages[ownerID] = safeMessage
+        if ownerID == localPlayerID {
+            localCarModelErrorMessage = safeMessage
+        } else if let ownerContext = context(for: ownerID) {
+            _ = send(
+                .carModelFailed(
+                    playerID: ownerID,
+                    id: modelID,
+                    message: safeMessage
+                ),
+                to: ownerContext
+            )
+        }
+        broadcastRoster()
+    }
+
+    private func installHostLocalModel(_ data: Data) {
+        let id = UUID()
+        let model = StoredPeerCarModel(
+            id: id,
+            data: data,
+            flipped: EntityFactory.customCarFlipped
+        )
+        storedCarModels[localPlayerID] = model
+        modelAcknowledgements[localPlayerID] = [localPlayerID]
+        localCarModelTransferID = id
+        localImportedCarAcknowledged = true
+        localCarModelErrorMessage = nil
+    }
+
+    private func prepareHostLocalModelIfNeeded() {
+        guard role == .host, localCarChoice == .imported else { return }
+        do {
+            installHostLocalModel(try loadLocalImportedCarData())
+        } catch {
+            localImportedCarAcknowledged = false
+            localCarModelErrorMessage = error.localizedDescription
+        }
+    }
+
+    private func sendGuestLocalModel(_ suppliedData: Data? = nil) {
+        guard role == .guest, state == .connected,
+              localCarChoice == .imported else { return }
         do {
             let data = try suppliedData ?? loadLocalImportedCarData()
             let id = UUID()
             localCarModelTransferID = id
             localImportedCarAcknowledged = false
             localCarModelErrorMessage = nil
-            guard send(.carModel(
+            guard sendToHost(.carModel(
+                playerID: localPlayerID,
                 id: id,
                 data: data,
                 flipped: EntityFactory.customCarFlipped
             )) else {
                 localCarModelTransferID = nil
-                localCarModelErrorMessage = "カスタム車を相手へ送信できませんでした"
+                localCarModelErrorMessage = "カスタム車をホストへ送信できませんでした"
                 return
             }
         } catch {
             localCarModelTransferID = nil
             localImportedCarAcknowledged = false
             localCarModelErrorMessage = error.localizedDescription
+        }
+    }
+
+    private func sendStoredModelToAll(
+        for ownerID: UUID, excluding excludedIDs: Set<UUID> = []
+    ) {
+        guard let model = storedCarModels[ownerID] else { return }
+        broadcast(
+            .carModel(
+                playerID: ownerID,
+                id: model.id,
+                data: model.data,
+                flipped: model.flipped
+            ),
+            excluding: excludedIDs.union([ownerID])
+        )
+    }
+
+    private func sendStoredModels(to context: PeerConnectionContext) {
+        guard let viewerID = context.playerID else { return }
+        for (ownerID, model) in storedCarModels where ownerID != viewerID {
+            _ = send(
+                .carModel(
+                    playerID: ownerID,
+                    id: model.id,
+                    data: model.data,
+                    flipped: model.flipped
+                ),
+                to: context
+            )
+        }
+    }
+
+    private func clearStoredModel(for playerID: UUID) {
+        storedCarModels.removeValue(forKey: playerID)
+        modelAcknowledgements.removeValue(forKey: playerID)
+        if playerID == localPlayerID {
+            localCarModelTransferID = nil
         }
     }
 
@@ -801,9 +1473,7 @@ final class PeerRaceSession {
         guard data.count <= Self.maximumCarModelSize else {
             throw ImportedCarFileError.tooLarge
         }
-        guard isValidUSDZ(data) else {
-            throw ImportedCarFileError.invalid
-        }
+        guard isValidUSDZ(data) else { throw ImportedCarFileError.invalid }
         return data
     }
 
@@ -811,36 +1481,157 @@ final class PeerRaceSession {
         data.count >= 4 && data.starts(with: [0x50, 0x4b, 0x03, 0x04])
     }
 
-    private func rejectRemoteCarModel(id: UUID, message: String) {
+    // MARK: - Host state
+
+    private func broadcastRoster() {
+        guard role == .host else { return }
+        participants.sort { $0.slot < $1.slot }
+        notifyParticipantsChanged()
+        broadcast(.roster(participants))
+    }
+
+    private func invalidateCourseForRosterChange() {
+        guard role == .host, !raceInProgress else { return }
+        invalidateAllReady()
+        courseAppliedParticipantIDs.removeAll()
+        currentCourseSyncID = nil
+        let needsBroadcast = courseSyncState != .hostPlacement
+        courseSyncState = .hostPlacement
+        if needsBroadcast {
+            broadcast(.courseSyncReset)
+            onCourseSyncInvalidated?()
+        }
+    }
+
+    private func hostCourseFailure(_ message: String) {
         let safeMessage = String(message.prefix(160))
-        remoteCarModelTransferID = id
-        remoteImportedCarReady = false
-        remoteReady = false
-        remoteCarModelErrorMessage = safeMessage
-        send(.carModelFailed(id: id, message: safeMessage))
+        invalidateAllReady()
+        courseSyncState = .failed(safeMessage)
+        broadcastRoster()
+        broadcast(.courseMapFailed(
+            id: currentCourseSyncID,
+            message: safeMessage
+        ))
+        onCourseSyncInvalidated?()
+    }
+
+    private func performHostReset() {
+        guard role == .host else { return }
+        raceInProgress = false
+        resetRoundState()
+        invalidateAllReady()
+        broadcast(.resetRace)
+        broadcastRoster()
+        onResetRace?()
+    }
+
+    private func recordFinish(playerID: UUID, raceTime: TimeInterval) {
+        guard role == .host, raceInProgress,
+              participant(id: playerID) != nil,
+              !finishOrder.contains(playerID),
+              raceTime.isFinite, raceTime >= 0 else { return }
+        finishOrder.append(playerID)
+        let position = finishOrder.count
+        if playerID == localPlayerID {
+            onFinishResult?(position, raceTime)
+        } else if let context = context(for: playerID) {
+            _ = send(
+                .finishResult(
+                    playerID: playerID,
+                    position: position,
+                    raceTime: raceTime
+                ),
+                to: context
+            )
+        }
+        completeRaceIfNeeded()
+    }
+
+    private func completeRaceIfNeeded() {
+        guard role == .host, raceInProgress, !raceComplete else { return }
+        let currentIDs = Set(participants.map(\.id))
+        guard currentIDs.isSubset(of: Set(finishOrder)) else { return }
+        raceComplete = true
+        broadcast(.raceComplete)
+    }
+
+    private func acknowledgeModelsSynchronizedAfterDeparture() {
+        let requiredIDs = Set(participants.map(\.id))
+        for participant in participants where participant.carChoice == .imported {
+            guard let model = storedCarModels[participant.id],
+                  requiredIDs.isSubset(
+                    of: modelAcknowledgements[participant.id] ?? []
+                  ) else { continue }
+            remoteCarModelErrorMessages.removeValue(forKey: participant.id)
+            guard participant.id != localPlayerID,
+                  let ownerContext = context(for: participant.id) else { continue }
+            _ = send(
+                .carModelReady(playerID: participant.id, id: model.id),
+                to: ownerContext
+            )
+        }
+    }
+
+    // MARK: - State helpers
+
+    private func participant(id: UUID) -> PeerRaceParticipant? {
+        participants.first { $0.id == id }
+    }
+
+    private func context(for playerID: UUID) -> PeerConnectionContext? {
+        connections.values.first { $0.playerID == playerID }
+    }
+
+    private func updateParticipant(
+        _ id: UUID, change: (inout PeerRaceParticipant) -> Void
+    ) {
+        guard let index = participants.firstIndex(where: { $0.id == id }) else { return }
+        change(&participants[index])
+    }
+
+    private func setParticipantReady(_ id: UUID, ready: Bool) {
+        updateParticipant(id) { $0.isReady = ready }
+    }
+
+    private func invalidateAllReady() {
+        for index in participants.indices { participants[index].isReady = false }
+    }
+
+    private func resetLocalParticipant(slot: Int) {
+        participants = [PeerRaceParticipant(
+            id: localPlayerID,
+            name: localPlayerName,
+            slot: slot,
+            isReady: false,
+            carChoice: localCarChoice
+        )]
+        notifyParticipantsChanged()
+    }
+
+    private func notifyParticipantsChanged() {
+        participants.sort { $0.slot < $1.slot }
+        onParticipantsChanged?(participants, localPlayerID)
+        let isConnected = state == .connected && !remoteParticipants.isEmpty
+        if isConnected != lastConnectionNotification {
+            lastConnectionNotification = isConnected
+            onConnectionChanged?(isConnected)
+        }
     }
 
     private func resetFinishState() {
-        localFinished = false
-        remoteFinished = false
+        finishOrder.removeAll()
         raceComplete = false
         snapshotAccumulator = 0
     }
 
-    private func completeRaceIfNeeded() {
-        guard role == .host, localFinished, remoteFinished,
-              !raceComplete else { return }
-        raceComplete = true
-        send(.raceComplete)
-    }
-
     private func resetRoundState() {
-        localReady = false
-        remoteReady = false
+        for index in participants.indices { participants[index].isReady = false }
         resetFinishState()
     }
 
     private func resetCourseSyncState() {
+        courseAppliedParticipantIDs.removeAll()
+        currentCourseSyncID = nil
         switch role {
         case .host:
             courseSyncState = .hostPlacement
@@ -852,11 +1643,13 @@ final class PeerRaceSession {
     }
 
     private func resetCarModelSyncState() {
+        storedCarModels.removeAll()
+        modelAcknowledgements.removeAll()
+        remoteImportedCarReadyIDs.removeAll()
+        remoteCarModelTransferIDs.removeAll()
+        remoteCarModelErrorMessages.removeAll()
         localCarModelTransferID = nil
-        remoteCarModelTransferID = nil
         localImportedCarAcknowledged = localCarChoice != .imported
-        remoteImportedCarReady = true
         localCarModelErrorMessage = nil
-        remoteCarModelErrorMessage = nil
     }
 }
