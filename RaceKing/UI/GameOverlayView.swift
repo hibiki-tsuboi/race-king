@@ -9,23 +9,54 @@ import UniformTypeIdentifiers
 
 /// HUD, touch controls, race setup, and results layered over the AR view.
 struct GameOverlayView: View {
+    private enum ExitDestination {
+        case modeSelection
+        case title
+    }
+
     @Bindable var game: RaceGame
     @Bindable var multiplayer: PeerRaceSession
     var roomPlanSupported = false
     var canScanRoom = false
     var onScanRoom: () -> Void = {}
     var onChooseMode: () -> Void = {}
+    var onReturnToTitle: () -> Void = {}
+    @State private var pendingExitDestination: ExitDestination?
 
     var body: some View {
         ZStack {
             VStack {
-                HUDView(game: game, onReset: resetRace)
+                HUDView(
+                    game: game,
+                    onReset: resetRace,
+                    onChooseMode: { requestExit(to: .modeSelection) },
+                    onReturnToTitle: { requestExit(to: .title) }
+                )
                 Spacer()
                 ControlsView(game: game)
             }
             .padding()
 
             centerMessage
+        }
+        .confirmationDialog(
+            "レースを終了しますか？",
+            isPresented: Binding(
+                get: { pendingExitDestination != nil },
+                set: { if !$0 { pendingExitDestination = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button(exitConfirmationTitle, role: .destructive) {
+                guard let destination = pendingExitDestination else { return }
+                pendingExitDestination = nil
+                performExit(to: destination)
+            }
+            Button("キャンセル", role: .cancel) {
+                pendingExitDestination = nil
+            }
+        } message: {
+            Text("進行中のレースはリセットされます。")
         }
     }
 
@@ -265,6 +296,34 @@ struct GameOverlayView: View {
         }
     }
 
+    private func requestExit(to destination: ExitDestination) {
+        guard game.phase == .countdown || game.phase == .racing else {
+            performExit(to: destination)
+            return
+        }
+        pendingExitDestination = destination
+    }
+
+    private func performExit(to destination: ExitDestination) {
+        switch destination {
+        case .modeSelection:
+            onChooseMode()
+        case .title:
+            onReturnToTitle()
+        }
+    }
+
+    private var exitConfirmationTitle: String {
+        switch pendingExitDestination {
+        case .modeSelection:
+            "モード選択に戻る"
+        case .title:
+            "タイトルに戻る"
+        case nil:
+            "終了する"
+        }
+    }
+
     @ViewBuilder
     private var roomDriveSetup: some View {
         if game.hasScannedRoom {
@@ -341,6 +400,8 @@ struct HUDView: View {
 
     @Bindable var game: RaceGame
     var onReset: () -> Void = {}
+    var onChooseMode: () -> Void = {}
+    var onReturnToTitle: () -> Void = {}
     @State private var showingCarImporter = false
     @State private var importSlot: CarImportSlot = .player
     @State private var importErrorMessage: String?
@@ -409,6 +470,22 @@ struct HUDView: View {
 
             VStack(alignment: .trailing, spacing: 8) {
                 HStack(spacing: 8) {
+                    Menu {
+                        Button(action: onChooseMode) {
+                            Label("モード選択に戻る", systemImage: "square.grid.2x2")
+                        }
+                        Button(action: onReturnToTitle) {
+                            Label("タイトルに戻る", systemImage: "house.fill")
+                        }
+                    } label: {
+                        Image(systemName: "arrowshape.turn.up.backward.fill")
+                            .font(.title3.bold())
+                            .padding(10)
+                            .background(.black.opacity(0.45), in: Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("戻る")
+
                     if game.phase != .ready {
                         Button(action: onReset) {
                             Image(systemName: "arrow.counterclockwise")

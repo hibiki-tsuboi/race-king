@@ -124,7 +124,8 @@ struct ContentView: View {
                     roomPlanSupported: roomPlanSupported && !game.virtualModeActive,
                     canScanRoom: canScanRoom,
                     onScanRoom: startRoomScan,
-                    onChooseMode: returnToModeSelection
+                    onChooseMode: returnToModeSelection,
+                    onReturnToTitle: returnToTitle
                 )
 
                 if cameraAccessDenied && !game.virtualModeActive {
@@ -231,28 +232,42 @@ struct ContentView: View {
     }
 
     private func returnToModeSelection() {
-        guard game.phase == .ready else { return }
+        leaveGame(for: .modeSelection)
+    }
+
+    private func returnToTitle() {
+        guard screen == .game else {
+            withAnimation(.easeInOut(duration: 0.3)) {
+                screen = .title
+            }
+            return
+        }
+        leaveGame(for: .title)
+    }
+
+    /// Stops every live game service before leaving the RealityView.
+    private func leaveGame(for destination: AppScreen) {
         multiplayer.disconnect()
         updateSubscription = nil
         tilt.stop()
         game.steeringInput = 0
+        game.throttleInput = false
+        game.brakeInput = false
+        if game.phase != .ready {
+            game.reset()
+        }
+        audio.setEngine(speedRatio: 0, running: false)
         isPreparingRoomScan = false
         courseScaleAtPinchStart = nil
         courseRotationAtGestureStart = nil
         arSession.pause()
         isStoppingSpatialTracking = true
         withAnimation(.easeInOut(duration: 0.3)) {
-            screen = .modeSelection
+            screen = destination
         }
         Task {
             await spatialTrackingSession.stop()
             isStoppingSpatialTracking = false
-        }
-    }
-
-    private func returnToTitle() {
-        withAnimation(.easeInOut(duration: 0.3)) {
-            screen = .title
         }
     }
 
