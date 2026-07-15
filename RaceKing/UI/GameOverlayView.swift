@@ -93,15 +93,7 @@ struct GameOverlayView: View {
                 Text("🏁 FINISH!")
                     .font(.system(size: 36, weight: .black, design: .rounded))
                     .foregroundStyle(.white)
-                if let position = game.finalPosition {
-                    Text("\(position)位")
-                        .font(.system(size: 84, weight: .black, design: .rounded))
-                        .foregroundStyle(position == 1 ? .yellow : .white)
-                }
-                Text("TIME  \(lapTimeString(game.raceTime))")
-                    .font(.title3.bold())
-                    .monospacedDigit()
-                    .foregroundStyle(.white)
+                finishedDetails
                 Button {
                     game.reset()
                 } label: {
@@ -117,6 +109,50 @@ struct GameOverlayView: View {
             .padding(28)
             .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 22))
         }
+    }
+
+    @ViewBuilder
+    private var finishedDetails: some View {
+        switch game.mode {
+        case .timeAttack:
+            if let sessionBest = game.sessionBestLapTime {
+                Text("今回のベスト")
+                    .font(.caption.bold())
+                    .foregroundStyle(.white.opacity(0.8))
+                Text(lapTimeString(sessionBest))
+                    .font(.system(size: 44, weight: .black, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundStyle(.white)
+                if game.sessionSetNewBestLap {
+                    Text("NEW RECORD!")
+                        .font(.headline.weight(.black))
+                        .foregroundStyle(.yellow)
+                }
+                if let delta = game.sessionBestLapDelta {
+                    Text("自己ベスト差  \(signedLapTimeString(delta))")
+                        .font(.callout.bold())
+                        .monospacedDigit()
+                        .foregroundStyle(delta < 0 ? .green : .white)
+                }
+            }
+        case .race:
+            if let position = game.finalPosition {
+                Text("\(position)位")
+                    .font(.system(size: 84, weight: .black, design: .rounded))
+                    .foregroundStyle(position == 1 ? .yellow : .white)
+            }
+            Text("TIME  \(lapTimeString(game.raceTime))")
+                .font(.title3.bold())
+                .monospacedDigit()
+                .foregroundStyle(.white)
+        case .roomDrive:
+            EmptyView()
+        }
+    }
+
+    private func signedLapTimeString(_ time: TimeInterval) -> String {
+        let sign = time < 0 ? "−" : "+"
+        return sign + lapTimeString(abs(time))
     }
 
     private var readyMenu: some View {
@@ -380,7 +416,8 @@ struct HUDView: View {
     private var lapLabel: String {
         switch game.mode {
         case .timeAttack:
-            return game.phase == .racing ? "LAP \(game.lapCount + 1)" : "LAP –"
+            let current = min(game.lapCount + 1, RaceGame.timeAttackLapTotal)
+            return "LAP \(current)/\(RaceGame.timeAttackLapTotal)"
         case .race:
             let current = min(game.lapCount + 1, RaceGame.raceLapTotal)
             return "LAP \(current)/\(RaceGame.raceLapTotal)"

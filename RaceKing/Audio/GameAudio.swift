@@ -159,6 +159,14 @@ final class GameAudio {
             if isBest {
                 beep(frequency: 1568, duration: 0.25, amplitude: 0.5, delay: 0.24)
             }
+        case .timeAttackFinished(let isNewBest):
+            let fanfare: [Float] = isNewBest
+                ? [784, 988, 1175, 1568]
+                : [660, 784, 988]
+            for (i, frequency) in fanfare.enumerated() {
+                beep(frequency: frequency, duration: 0.18, amplitude: 0.5,
+                     delay: Double(i) * 0.17)
+            }
         case .raceFinished(let position):
             let fanfare: [Float] = position == 1
                 ? [784, 988, 1175, 1568]

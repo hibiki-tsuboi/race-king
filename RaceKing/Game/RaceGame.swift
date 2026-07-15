@@ -17,6 +17,7 @@ enum GameEvent {
     case countdownTick(Int)
     case go
     case lapCompleted(isBest: Bool)
+    case timeAttackFinished(isNewBest: Bool)
     case raceFinished(position: Int)
     /// Periodic pulse while the player is off the road.
     case offRoad
@@ -48,6 +49,8 @@ final class RaceGame {
         case roomDrive
     }
 
+    /// Laps available for setting the fastest time in time attack mode.
+    static let timeAttackLapTotal = 3
     /// Laps to the checkered flag in VS race mode.
     static let raceLapTotal = 3
     static let minimumCourseScale: Float = 0.5
@@ -72,6 +75,11 @@ final class RaceGame {
     private(set) var lastLapTime: TimeInterval?
     /// Best lap ever (time attack), persisted across launches.
     private(set) var bestLapTime: TimeInterval?
+    /// Fastest lap recorded during the current time attack.
+    private(set) var sessionBestLapTime: TimeInterval?
+    /// Session best minus the record at the start; negative means faster.
+    private(set) var sessionBestLapDelta: TimeInterval?
+    private(set) var sessionSetNewBestLap = false
     private(set) var countdownValue = 3
     /// Playful scaled speed for the HUD (the car itself moves at miniature scale).
     private(set) var displaySpeed = 0
@@ -191,6 +199,7 @@ final class RaceGame {
     private var nextCheckpoint = 1
     private var countdownRemaining: TimeInterval = 0
     private var ghost: GhostRecorder
+    private var bestLapTimeAtStart: TimeInterval?
     private var playerTrackS: Float = 0
     private var playerProgress: Float = 0
     private var aiFinishedCount = 0
@@ -365,6 +374,12 @@ final class RaceGame {
 
     func startRace() {
         guard phase == .ready, canStart else { return }
+        if mode == .timeAttack {
+            sessionBestLapTime = nil
+            sessionBestLapDelta = nil
+            sessionSetNewBestLap = false
+            bestLapTimeAtStart = bestLapTime
+        }
         countdownRemaining = 3
         countdownValue = 3
         phase = .countdown
@@ -376,6 +391,10 @@ final class RaceGame {
         lapCount = 0
         currentLapTime = 0
         lastLapTime = nil
+        sessionBestLapTime = nil
+        sessionBestLapDelta = nil
+        sessionSetNewBestLap = false
+        bestLapTimeAtStart = nil
         raceTime = 0
         displaySpeed = 0
         playerPosition = 1
@@ -681,7 +700,7 @@ final class RaceGame {
     }
 
     private func updateGhost() {
-        guard mode == .timeAttack, ghostEnabled,
+        guard phase == .racing, mode == .timeAttack, ghostEnabled,
               let pose = ghost.best?.pose(at: currentLapTime) else {
             ghostCar.isEnabled = false
             return
@@ -729,14 +748,30 @@ final class RaceGame {
         switch mode {
         case .timeAttack:
             let isBest = bestLapTime.map { currentLapTime < $0 } ?? true
+            sessionBestLapTime = min(sessionBestLapTime ?? currentLapTime, currentLapTime)
             ghost.finishLap(duration: currentLapTime)
             if isBest {
                 bestLapTime = currentLapTime
                 UserDefaults.standard.set(currentLapTime, forKey: bestLapKey)
             }
-            onEvent?(.lapCompleted(isBest: isBest))
-            currentLapTime = 0
-            ghost.beginLap()
+            if lapCount >= Self.timeAttackLapTotal {
+                if let sessionBestLapTime {
+                    if let bestLapTimeAtStart {
+                        sessionBestLapDelta = sessionBestLapTime - bestLapTimeAtStart
+                        sessionSetNewBestLap = sessionBestLapTime < bestLapTimeAtStart
+                    } else {
+                        sessionSetNewBestLap = true
+                    }
+                }
+                phase = .finished
+                ghostCar.isEnabled = false
+                physics.endDrift(rewardBoost: false)
+                onEvent?(.timeAttackFinished(isNewBest: sessionSetNewBestLap))
+            } else {
+                onEvent?(.lapCompleted(isBest: isBest))
+                currentLapTime = 0
+                ghost.beginLap()
+            }
         case .race:
             if lapCount >= Self.raceLapTotal {
                 let position = aiFinishedCount + 1

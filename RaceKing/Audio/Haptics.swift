@@ -25,7 +25,7 @@ final class Haptics {
             } else {
                 medium.impactOccurred()
             }
-        case .raceFinished:
+        case .timeAttackFinished, .raceFinished:
             notification.notificationOccurred(.success)
         case .offRoad:
             light.impactOccurred(intensity: 0.7)
