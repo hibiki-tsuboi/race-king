@@ -14,6 +14,7 @@ struct ContentView: View {
     @State private var audio = GameAudio()
     @State private var haptics = Haptics()
     @State private var tilt = TiltSteering()
+    @State private var multiplayer = PeerRaceSession()
     @State private var arSession = ARSession()
     @State private var spatialTrackingSession = SpatialTrackingSession()
     @State private var cameraAccessDenied = false
@@ -51,6 +52,11 @@ struct ContentView: View {
                     content.add(game.roomRoot)
                     updateSubscription = content.subscribe(to: SceneEvents.Update.self) { event in
                         game.update(deltaTime: event.deltaTime)
+                        if game.mode == .peerRace {
+                            multiplayer.sendCarState(
+                                game.peerCarState(), deltaTime: event.deltaTime
+                            )
+                        }
                         audio.setEngine(
                             speedRatio: game.speedRatio,
                             running: game.isEngineRunning,
@@ -93,6 +99,7 @@ struct ContentView: View {
 
                 GameOverlayView(
                     game: game,
+                    multiplayer: multiplayer,
                     roomPlanSupported: roomPlanSupported && !game.virtualModeActive,
                     canScanRoom: canScanRoom,
                     onScanRoom: startRoomScan
@@ -111,15 +118,28 @@ struct ContentView: View {
                 audio.handle(event)
                 haptics.handle(event)
             }
+            configureMultiplayer()
         }
         .onChange(of: game.tiltSteeringEnabled) {
             guard hasEnteredGame else { return }
             updateTiltSteering()
         }
+        .onChange(of: game.mode) {
+            if game.mode != .peerRace, multiplayer.state != .idle {
+                multiplayer.disconnect()
+            }
+        }
+        .onChange(of: multiplayer.role) {
+            if let role = multiplayer.role {
+                game.setPeerRole(isHost: role == .host)
+            }
+        }
         .onChange(of: scenePhase) {
             if hasEnteredGame, scenePhase == .active {
                 refreshCameraAuthorization()
                 Task { await runSpatialTracking() }
+            } else if scenePhase == .background, game.mode == .peerRace {
+                multiplayer.disconnect()
             }
         }
         .fullScreenCover(
@@ -156,6 +176,29 @@ struct ContentView: View {
         updateTiltSteering()
         refreshCameraAuthorization()
         Task { await runSpatialTracking() }
+    }
+
+    private func configureMultiplayer() {
+        let game = game
+        let multiplayer = multiplayer
+        multiplayer.onStartRace = { [weak game] in
+            game?.startRace()
+        }
+        multiplayer.onResetRace = { [weak game] in
+            game?.reset()
+        }
+        multiplayer.onCarState = { [weak game] state in
+            game?.applyPeerCarState(state)
+        }
+        multiplayer.onFinishResult = { [weak game] position, raceTime in
+            game?.finishPeerRace(position: position, raceTime: raceTime)
+        }
+        multiplayer.onConnectionChanged = { [weak game] connected in
+            game?.setPeerConnected(connected)
+        }
+        game.onPeerRaceLocalFinish = { [weak multiplayer] raceTime in
+            multiplayer?.reportLocalFinish(raceTime: raceTime)
+        }
     }
 
     private var roomPlanSupported: Bool {

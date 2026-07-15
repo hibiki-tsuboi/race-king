@@ -10,9 +10,22 @@
 		B6C537CB3003489500DC9E83 /* RaceKing.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = RaceKing.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		B6C537DB3003489600DC9E83 /* Exceptions for "RaceKing" folder in "RaceKing" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = B6C537CA3003489500DC9E83 /* RaceKing */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		B6C537CD3003489500DC9E83 /* RaceKing */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				B6C537DB3003489600DC9E83 /* Exceptions for "RaceKing" folder in "RaceKing" target */,
+			);
 			path = RaceKing;
 			sourceTree = "<group>";
 		};
@@ -255,7 +268,8 @@
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
-				GENERATE_INFOPLIST_FILE = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = RaceKing/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "Anywhere GP";
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.racing-games";
@@ -306,7 +320,8 @@
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
-				GENERATE_INFOPLIST_FILE = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = RaceKing/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "Anywhere GP";
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.racing-games";

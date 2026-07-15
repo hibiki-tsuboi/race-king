@@ -46,6 +46,7 @@ final class RaceGame {
     enum Mode: String, CaseIterable {
         case timeAttack
         case race
+        case peerRace
         case roomDrive
     }
 
@@ -97,6 +98,8 @@ final class RaceGame {
     private(set) var courseScale: Float = 1
     /// Y-axis rotation accumulated by the two-finger rotation gesture.
     private(set) var courseRotation: Float = 0
+    /// Whether a nearby opponent is currently available for two-player mode.
+    private(set) var peerConnected = false
 
     var canStart: Bool { mode != .roomDrive || roomStartPlaced }
 
@@ -130,6 +133,8 @@ final class RaceGame {
 
     /// Hook for audio and haptics.
     var onEvent: ((GameEvent) -> Void)?
+    /// Reports the local checkered-flag time to the nearby-session host.
+    var onPeerRaceLocalFinish: ((TimeInterval) -> Void)?
 
     // MARK: - Scene
 
@@ -173,6 +178,7 @@ final class RaceGame {
     }
     private let car: Entity
     private let ghostCar: Entity
+    private let peerCar: Entity
     private let checkpoints: [SIMD3<Float>]
     private var aiDrivers: [AIDriver] = []
     private var roomEnvironment: RoomDriveEnvironment?
@@ -190,7 +196,9 @@ final class RaceGame {
     var carPosition: SIMD3<Float> { car.position }
     var carHeading: Float { physics.heading }
     var speedRatio: Float { physics.speed / CarPhysics.maxSpeed }
-    var isEngineRunning: Bool { phase == .countdown || phase == .racing }
+    var isEngineRunning: Bool {
+        (phase == .countdown || phase == .racing) && !peerLocalFinished
+    }
     var isDrifting: Bool { physics.isDrifting }
 
     // MARK: - Simulation
@@ -206,6 +214,18 @@ final class RaceGame {
     private var offRoadPulse: TimeInterval = 0
     private var wallHitCooldown: TimeInterval = 0
     private var playerTouchingWall = false
+    private var peerIsHost = true
+    private var peerLocalFinished = false
+    private var peerProgress: Float = 0
+    private(set) var peerLapCount = 0
+    private var peerFinished = false
+    private var peerTargetPosition = SIMD3<Float>.zero
+    private var peerTargetHeading: Float = 0
+    private var peerDisplayedHeading: Float = 0
+    private var hasPeerCarState = false
+    private var peerGlowBlue: Entity?
+    private var peerGlowOrange: Entity?
+    private var peerBoostFlame: Entity?
 
     // MARK: - Drift bookkeeping
 
@@ -231,8 +251,13 @@ final class RaceGame {
         ghost = GhostRecorder(trackLength: layout.totalLength)
         bestLapKey = "bestLapTime-\(Int(layout.totalLength * 1000))"
         ghostCar = EntityFactory.makeCar(bodyColor: EntityFactory.ghostBodyColor)
+        peerCar = EntityFactory.makeCar(
+            bodyColor: .init(red: 0.2, green: 0.45, blue: 0.95, alpha: 1),
+            allowCustomModel: false
+        )
         ghostCar.components.set(OpacityComponent(opacity: 0.35))
         ghostCar.isEnabled = false
+        peerCar.isEnabled = false
         checkpoints = layout.checkpoints
         aiDrivers = AIDriver.defaultOpponents()
         ghostEnabled = UserDefaults.standard.object(forKey: "ghostEnabled") as? Bool ?? true
@@ -256,6 +281,9 @@ final class RaceGame {
         glowBlue = car.findEntity(named: "glowBlue")
         glowOrange = car.findEntity(named: "glowOrange")
         boostFlame = car.findEntity(named: "boostFlame")
+        peerGlowBlue = peerCar.findEntity(named: "glowBlue")
+        peerGlowOrange = peerCar.findEntity(named: "glowOrange")
+        peerBoostFlame = peerCar.findEntity(named: "boostFlame")
         refreshRoomCarFootprint()
 
         let savedBest = UserDefaults.standard.double(forKey: bestLapKey)
@@ -372,8 +400,80 @@ final class RaceGame {
         aiDrivers[index].applyModel(template)
     }
 
+    // MARK: - Nearby two-player race
+
+    func setPeerRole(isHost: Bool) {
+        guard phase == .ready else { return }
+        peerIsHost = isHost
+        if mode == .peerRace { placeCarsOnGrid() }
+    }
+
+    func setPeerConnected(_ connected: Bool) {
+        peerConnected = connected
+        peerCar.isEnabled = connected && mode == .peerRace
+        if !connected, mode == .peerRace, phase != .ready {
+            reset()
+        }
+    }
+
+    /// A compact course-local snapshot; independent AR placement stays local.
+    func peerCarState() -> PeerRacePacket.CarState {
+        PeerRacePacket.CarState(
+            x: car.position.x,
+            y: car.position.y,
+            z: car.position.z,
+            heading: physics.heading,
+            progress: playerProgress,
+            lapCount: lapCount,
+            finished: peerLocalFinished,
+            drifting: physics.isDrifting,
+            boosting: physics.isBoosting,
+            driftChargeLevel: physics.chargeLevel
+        )
+    }
+
+    /// Applies only finite, plausible values received from the nearby peer.
+    func applyPeerCarState(_ state: PeerRacePacket.CarState) {
+        guard mode == .peerRace,
+              state.x.isFinite, state.y.isFinite, state.z.isFinite,
+              state.heading.isFinite, state.progress.isFinite,
+              abs(state.x) < 5, abs(state.y) < 2, abs(state.z) < 5,
+              abs(state.progress) < 10_000,
+              (0...Self.raceLapTotal).contains(state.lapCount),
+              (0...2).contains(state.driftChargeLevel) else { return }
+
+        peerTargetPosition = [state.x, state.y, state.z]
+        peerTargetHeading = state.heading
+        peerProgress = state.progress
+        peerLapCount = state.lapCount
+        peerFinished = state.finished
+        peerGlowBlue?.isEnabled = state.drifting && state.driftChargeLevel == 1
+        peerGlowOrange?.isEnabled = state.drifting && state.driftChargeLevel >= 2
+        peerBoostFlame?.isEnabled = state.boosting
+
+        if !hasPeerCarState {
+            peerCar.position = peerTargetPosition
+            peerDisplayedHeading = peerTargetHeading
+            peerCar.orientation = simd_quatf(angle: peerDisplayedHeading, axis: [0, 1, 0])
+            hasPeerCarState = true
+        }
+    }
+
+    /// Applies the host-authoritative result after this player finishes.
+    func finishPeerRace(position: Int, raceTime: TimeInterval) {
+        guard mode == .peerRace, peerLocalFinished,
+              (1...2).contains(position), raceTime.isFinite else { return }
+        self.raceTime = max(0, raceTime)
+        finalPosition = position
+        playerPosition = position
+        phase = .finished
+        physics.endDrift(rewardBoost: false)
+        onEvent?(.raceFinished(position: position))
+    }
+
     func startRace() {
-        guard phase == .ready, canStart else { return }
+        guard phase == .ready, canStart,
+              mode != .peerRace || peerConnected else { return }
         if mode == .timeAttack {
             sessionBestLapTime = nil
             sessionBestLapDelta = nil
@@ -400,6 +500,8 @@ final class RaceGame {
         playerPosition = 1
         finalPosition = nil
         aiFinishedCount = 0
+        peerLocalFinished = false
+        peerFinished = false
         ghostCar.isEnabled = false
         clearDriftState()
         placeCarsOnGrid()
@@ -420,6 +522,8 @@ final class RaceGame {
             }
         }
 
+        if mode == .peerRace { updatePeerCar(deltaTime) }
+
         let dt = Float(min(deltaTime, 1.0 / 20.0))
         switch phase {
         case .ready:
@@ -439,24 +543,18 @@ final class RaceGame {
             }
         case .racing:
             currentLapTime += deltaTime
-            if mode == .race { raceTime += deltaTime }
-            stepPlayer(dt, deltaTime: deltaTime)
+            if mode == .race || mode == .peerRace { raceTime += deltaTime }
+            if mode == .peerRace, peerLocalFinished {
+                coastPlayer(dt, deltaTime: deltaTime)
+            } else {
+                stepPlayer(dt, deltaTime: deltaTime)
+            }
             stepAI(dt)
             separateCars()
             updateGhost()
             updateRanking()
         case .finished:
-            // Let the field keep rolling past the flag; brake only to a stop,
-            // not into reverse.
-            let movement = physics.step(
-                dt: dt, steeringInput: 0, throttle: false,
-                brake: physics.speed > 0.01, offRoad: false
-            )
-            car.position += movement
-            let wallNormal = constrainPlayerToWalls()
-            _ = resolvePlayerWallContact(normal: wallNormal, travel: movement)
-            car.orientation = simd_quatf(angle: physics.heading, axis: [0, 1, 0])
-            updateDriftEffects(deltaTime)
+            coastPlayer(dt, deltaTime: deltaTime)
             stepAI(dt)
             separateCars()
         }
@@ -544,6 +642,20 @@ final class RaceGame {
             ghost.record(time: currentLapTime, position: car.position, heading: physics.heading)
         }
         if mode != .roomDrive { checkPlayerCheckpoints() }
+    }
+
+    /// Rolls a finished car to a halt without allowing reverse acceleration.
+    private func coastPlayer(_ dt: Float, deltaTime: TimeInterval) {
+        let movement = physics.step(
+            dt: dt, steeringInput: 0, throttle: false,
+            brake: physics.speed > 0.01, offRoad: false
+        )
+        car.position += movement
+        let wallNormal = constrainPlayerToWalls()
+        _ = resolvePlayerWallContact(normal: wallNormal, travel: movement)
+        car.orientation = simd_quatf(angle: physics.heading, axis: [0, 1, 0])
+        updateDriftEffects(deltaTime)
+        displaySpeed = Int(abs(physics.speed) * 400)
     }
 
     private func stepAI(_ dt: Float) {
@@ -710,12 +822,38 @@ final class RaceGame {
         ghostCar.orientation = simd_quatf(angle: pose.heading, axis: [0, 1, 0])
     }
 
+    /// Smooths 20 Hz network snapshots at the display frame rate.
+    private func updatePeerCar(_ deltaTime: TimeInterval) {
+        guard peerConnected, hasPeerCarState else { return }
+        let positionBlend = min(1, Float(deltaTime) * 12)
+        peerCar.position += (peerTargetPosition - peerCar.position) * positionBlend
+
+        let headingDelta = atan2(
+            sin(peerTargetHeading - peerDisplayedHeading),
+            cos(peerTargetHeading - peerDisplayedHeading)
+        )
+        peerDisplayedHeading += headingDelta * min(1, Float(deltaTime) * 14)
+        peerCar.orientation = simd_quatf(angle: peerDisplayedHeading, axis: [0, 1, 0])
+    }
+
     private func updateRanking() {
-        guard mode == .race else { return }
-        let s = layout.nearestS(to: car.position, near: playerTrackS)
-        playerProgress += layout.progressDelta(from: playerTrackS, to: s)
-        playerTrackS = s
-        playerPosition = aiDrivers.count { $0.progress > playerProgress } + 1
+        guard mode == .race || mode == .peerRace else { return }
+        if !peerLocalFinished {
+            let s = layout.nearestS(to: car.position, near: playerTrackS)
+            playerProgress += layout.progressDelta(from: playerTrackS, to: s)
+            playerTrackS = s
+        }
+        if mode == .race {
+            playerPosition = aiDrivers.count { $0.progress > playerProgress } + 1
+        } else if finalPosition == nil {
+            if peerFinished {
+                playerPosition = 2
+            } else if peerLocalFinished {
+                playerPosition = 1
+            } else {
+                playerPosition = peerProgress > playerProgress ? 2 : 1
+            }
+        }
     }
 
     // MARK: - Lap logic
@@ -784,6 +922,15 @@ final class RaceGame {
                 onEvent?(.lapCompleted(isBest: false))
                 currentLapTime = 0
             }
+        case .peerRace:
+            if lapCount >= Self.raceLapTotal {
+                peerLocalFinished = true
+                physics.endDrift(rewardBoost: false)
+                onPeerRaceLocalFinish?(raceTime)
+            } else {
+                onEvent?(.lapCompleted(isBest: false))
+                currentLapTime = 0
+            }
         case .roomDrive:
             break
         }
@@ -793,6 +940,8 @@ final class RaceGame {
 
     private func placeCarsOnGrid() {
         for driver in aiDrivers { driver.entity.removeFromParent() }
+        peerCar.removeFromParent()
+        peerCar.isEnabled = false
         nextCheckpoint = 1
         playerTouchingWall = false
 
@@ -815,6 +964,16 @@ final class RaceGame {
                 root.addChild(driver.entity)
             }
             placePlayer(back: 0.17, lateral: 0.037)
+        case .peerRace:
+            root.isEnabled = true
+            roomRoot.isEnabled = false
+            movePlayer(to: root)
+            car.isEnabled = true
+            root.addChild(peerCar)
+            let localLateral: Float = peerIsHost ? -0.037 : 0.037
+            placePlayer(back: 0.08, lateral: localLateral)
+            placePeer(back: 0.08, lateral: -localLateral)
+            peerCar.isEnabled = peerConnected
         case .roomDrive:
             root.isEnabled = false
             roomRoot.isEnabled = roomEnvironment != nil
@@ -876,5 +1035,23 @@ final class RaceGame {
         car.orientation = simd_quatf(angle: physics.heading, axis: [0, 1, 0])
         playerTrackS = layout.nearestS(to: car.position, near: s)
         playerProgress = 0
+    }
+
+    private func placePeer(back: Float, lateral: Float) {
+        let s = layout.startOffset - back
+        let grid = layout.sample(at: s)
+        let side = SIMD3<Float>(-grid.tangent.z, 0, grid.tangent.x)
+        peerCar.position = grid.position + side * lateral
+        peerDisplayedHeading = TrackLayout.heading(of: grid.tangent)
+        peerTargetPosition = peerCar.position
+        peerTargetHeading = peerDisplayedHeading
+        peerCar.orientation = simd_quatf(angle: peerDisplayedHeading, axis: [0, 1, 0])
+        peerProgress = 0
+        peerLapCount = 0
+        peerFinished = false
+        hasPeerCarState = false
+        peerGlowBlue?.isEnabled = false
+        peerGlowOrange?.isEnabled = false
+        peerBoostFlame?.isEnabled = false
     }
 }

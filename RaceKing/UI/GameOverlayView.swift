@@ -10,6 +10,7 @@ import UniformTypeIdentifiers
 /// HUD, touch controls, countdown, mode select, and results layered over the AR view.
 struct GameOverlayView: View {
     @Bindable var game: RaceGame
+    @Bindable var multiplayer: PeerRaceSession
     var roomPlanSupported = false
     var canScanRoom = false
     var onScanRoom: () -> Void = {}
@@ -17,7 +18,7 @@ struct GameOverlayView: View {
     var body: some View {
         ZStack {
             VStack {
-                HUDView(game: game)
+                HUDView(game: game, onReset: resetRace)
                 Spacer()
                 ControlsView(game: game)
             }
@@ -94,9 +95,12 @@ struct GameOverlayView: View {
                     .font(.system(size: 36, weight: .black, design: .rounded))
                     .foregroundStyle(.white)
                 finishedDetails
-                Button {
-                    game.reset()
-                } label: {
+                if game.mode == .peerRace && !multiplayer.raceComplete {
+                    Text("相手のゴールを待っています…")
+                        .font(.callout.bold())
+                        .foregroundStyle(.yellow)
+                }
+                Button(action: resetRace) {
                     Text("もう一度")
                         .font(.headline.weight(.black))
                         .foregroundStyle(.white)
@@ -105,6 +109,7 @@ struct GameOverlayView: View {
                         .background(.red.gradient, in: Capsule())
                 }
                 .buttonStyle(.plain)
+                .disabled(game.mode == .peerRace && !multiplayer.raceComplete)
             }
             .padding(28)
             .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 22))
@@ -135,7 +140,7 @@ struct GameOverlayView: View {
                         .foregroundStyle(delta < 0 ? .green : .white)
                 }
             }
-        case .race:
+        case .race, .peerRace:
             if let position = game.finalPosition {
                 Text("\(position)位")
                     .font(.system(size: 84, weight: .black, design: .rounded))
@@ -167,22 +172,25 @@ struct GameOverlayView: View {
                 #endif
 
                 Picker("モード", selection: $game.mode) {
-                    Text("タイムアタック").tag(RaceGame.Mode.timeAttack)
-                    Text("VS AIレース").tag(RaceGame.Mode.race)
+                    Text("TIME").tag(RaceGame.Mode.timeAttack)
+                    Text("VS AI").tag(RaceGame.Mode.race)
+                    Text("2人").tag(RaceGame.Mode.peerRace)
                     if roomPlanSupported {
                         Text("部屋").tag(RaceGame.Mode.roomDrive)
                     }
                 }
                 .pickerStyle(.segmented)
-                .frame(maxWidth: roomPlanSupported ? 340 : 290)
+                .frame(maxWidth: roomPlanSupported ? 360 : 330)
                 .padding(6)
                 .background(.black.opacity(0.4), in: RoundedRectangle(cornerRadius: 12))
 
-                if game.mode == .roomDrive {
+                if game.mode == .peerRace {
+                    PeerRaceLobbyView(multiplayer: multiplayer)
+                } else if game.mode == .roomDrive {
                     roomDriveSetup
                 }
 
-                if game.canStart {
+                if game.mode != .peerRace && game.canStart {
                     Button {
                         game.startRace()
                     } label: {
@@ -209,6 +217,14 @@ struct GameOverlayView: View {
                 : "まず部屋をスキャンしてください"
         }
         return "床やテーブルをタップしてコース移動\nドラッグで移動・二本指でサイズ／向き調整"
+    }
+
+    private func resetRace() {
+        if game.mode == .peerRace, multiplayer.state == .connected {
+            multiplayer.requestResetRace()
+        } else {
+            game.reset()
+        }
     }
 
     @ViewBuilder
@@ -286,6 +302,7 @@ struct HUDView: View {
     }
 
     @Bindable var game: RaceGame
+    var onReset: () -> Void = {}
     @State private var showingCarImporter = false
     @State private var importSlot: CarImportSlot = .player
     @State private var importErrorMessage: String?
@@ -322,6 +339,12 @@ struct HUDView: View {
                 Text(lapTimeString(game.currentLapTime))
                     .font(.system(size: 34, weight: .bold, design: .rounded))
                     .monospacedDigit()
+                if game.mode == .peerRace {
+                    let peerLap = min(game.peerLapCount + 1, RaceGame.raceLapTotal)
+                    Text("相手 LAP \(peerLap)/\(RaceGame.raceLapTotal)")
+                        .font(.caption.bold())
+                        .foregroundStyle(.cyan)
+                }
                 if game.mode == .timeAttack {
                     if let last = game.lastLapTime {
                         Text("LAST  \(lapTimeString(last))")
@@ -339,7 +362,8 @@ struct HUDView: View {
 
             Spacer()
 
-            if game.mode == .race && game.phase == .racing {
+            if (game.mode == .race || game.mode == .peerRace)
+                && game.phase == .racing {
                 Text("\(game.playerPosition)位")
                     .font(.system(size: 36, weight: .black, design: .rounded))
                 Spacer()
@@ -348,9 +372,7 @@ struct HUDView: View {
             VStack(alignment: .trailing, spacing: 8) {
                 HStack(spacing: 8) {
                     if game.phase != .ready {
-                        Button {
-                            game.reset()
-                        } label: {
+                        Button(action: onReset) {
                             Image(systemName: "arrow.counterclockwise")
                                 .font(.title3.bold())
                                 .padding(10)
@@ -421,6 +443,9 @@ struct HUDView: View {
             let current = min(game.lapCount + 1, RaceGame.timeAttackLapTotal)
             return "LAP \(current)/\(RaceGame.timeAttackLapTotal)"
         case .race:
+            let current = min(game.lapCount + 1, RaceGame.raceLapTotal)
+            return "LAP \(current)/\(RaceGame.raceLapTotal)"
+        case .peerRace:
             let current = min(game.lapCount + 1, RaceGame.raceLapTotal)
             return "LAP \(current)/\(RaceGame.raceLapTotal)"
         case .roomDrive:
