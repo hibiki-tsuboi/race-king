@@ -140,7 +140,8 @@ struct ContentView: View {
                     onSelect: enterGame,
                     onBack: returnToTitle
                 )
-                .transition(.opacity.combined(with: .scale(scale: 0.98)))
+                // Keep the top edge fixed while switching from the title.
+                .transition(.opacity)
             case .title:
                 TitleView(onStart: showModeSelection)
                     .transition(.opacity)
