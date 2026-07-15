@@ -88,24 +88,21 @@ struct ModeSelectionView: View {
                 mode: .timeAttack,
                 title: "タイムアタック",
                 detail: "ベストラップに挑戦",
-                systemImage: "stopwatch.fill",
-                color: .orange
+                imageName: "MenuTimeAttack"
             ),
             ModeOption(
                 id: "cpuRace",
                 mode: .race,
                 title: "CPU対戦",
                 detail: "ライバルたちと順位を競う",
-                systemImage: "person.3.fill",
-                color: .red
+                imageName: "MenuCPURace"
             ),
             ModeOption(
                 id: "peerRace",
                 mode: .peerRace,
                 title: "ネットワーク対戦",
                 detail: "同じWi-FiにつないだiPhone同士で対戦",
-                systemImage: "wifi",
-                color: .blue
+                imageName: "MenuNetworkRace"
             ),
             ModeOption(
                 id: "roomDrive",
@@ -114,8 +111,9 @@ struct ModeSelectionView: View {
                 detail: roomDriveAvailable
                     ? "部屋をスキャンして自由に走る"
                     : "LiDAR対応端末とカメラ許可が必要です",
-                systemImage: "viewfinder",
-                color: .cyan,
+                imageName: roomDriveAvailable
+                    ? "MenuFreeDrive"
+                    : "MenuFreeDriveUnavailable",
                 isEnabled: roomDriveAvailable
             ),
         ]
@@ -125,44 +123,21 @@ struct ModeSelectionView: View {
         Button {
             onSelect(option.mode)
         } label: {
-            VStack(alignment: .leading, spacing: 10) {
-                Image(systemName: option.systemImage)
-                    .font(.system(size: 28, weight: .bold))
-                    .foregroundStyle(.white)
-                    .frame(width: 54, height: 54)
-                    .background(option.color.gradient, in: Circle())
-
-                Text(option.title)
-                    .font(.headline.weight(.black))
-                    .foregroundStyle(.white)
-                    .lineLimit(2)
-
-                Text(option.detail)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.white.opacity(0.7))
-                    .fixedSize(horizontal: false, vertical: true)
-
-                Spacer(minLength: 0)
-
-                Label(
-                    option.isEnabled ? "このモードで遊ぶ" : "利用できません",
-                    systemImage: option.isEnabled ? "play.fill" : "lock.fill"
-                )
-                    .font(.caption2.bold())
-                    .foregroundStyle(option.isEnabled ? option.color : .white.opacity(0.5))
-            }
-            .frame(maxWidth: .infinity, minHeight: 168, alignment: .leading)
-            .padding(15)
-            .background(.black.opacity(0.38), in: RoundedRectangle(cornerRadius: 18))
-            .overlay {
-                RoundedRectangle(cornerRadius: 18)
-                    .strokeBorder(option.color.opacity(option.isEnabled ? 0.55 : 0.18))
-            }
-            .contentShape(RoundedRectangle(cornerRadius: 18))
-            .opacity(option.isEnabled ? 1 : 0.62)
+            Image(option.imageName)
+                .resizable()
+                .scaledToFit()
+                .frame(maxWidth: .infinity)
+                .contentShape(Rectangle())
+                .accessibilityHidden(true)
         }
         .buttonStyle(.plain)
         .disabled(!option.isEnabled || isPreparing)
+        .accessibilityLabel(option.title)
+        .accessibilityValue(
+            isPreparing
+                ? "準備中"
+                : option.isEnabled ? "利用可能" : "利用できません"
+        )
         .accessibilityHint(option.detail)
     }
 
@@ -181,8 +156,7 @@ private struct ModeOption: Identifiable {
     let mode: RaceGame.Mode
     let title: String
     let detail: String
-    let systemImage: String
-    let color: Color
+    let imageName: String
     var isEnabled = true
 }
 
