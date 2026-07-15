@@ -25,79 +25,84 @@ struct ContentView: View {
     @State private var courseRotationAtGestureStart: Float?
     @State private var realityViewSize = CGSize.zero
     @State private var updateSubscription: EventSubscription?
+    @State private var hasEnteredGame = false
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         ZStack {
-            RealityView { content in
-                #if targetEnvironment(simulator)
-                // No AR passthrough here: fake a floor and look down at the circuit.
-                content.add(EntityFactory.makeFallbackGround())
-                let camera = Entity(components: PerspectiveCameraComponent())
-                camera.look(at: .zero, from: [0, 1.9, 2.4], relativeTo: nil)
-                content.add(camera)
-                #else
-                // AR: show the real room and anchor the circuit to the floor.
-                content.camera = .spatialTracking
-                game.installCourseSurfaceAnchor()
-                // Camera pose feed for aim-based course placement.
-                game.cameraRig.components.set(AnchoringComponent(.camera))
-                content.add(game.cameraRig)
-                #endif
+            if hasEnteredGame {
+                RealityView { content in
+                    #if targetEnvironment(simulator)
+                    // No AR passthrough here: fake a floor and look down at the circuit.
+                    content.add(EntityFactory.makeFallbackGround())
+                    let camera = Entity(components: PerspectiveCameraComponent())
+                    camera.look(at: .zero, from: [0, 1.9, 2.4], relativeTo: nil)
+                    content.add(camera)
+                    #else
+                    // AR: show the real room and anchor the circuit to the floor.
+                    content.camera = .spatialTracking
+                    game.installCourseSurfaceAnchor()
+                    // Camera pose feed for aim-based course placement.
+                    game.cameraRig.components.set(AnchoringComponent(.camera))
+                    content.add(game.cameraRig)
+                    #endif
 
-                content.add(game.anchorRoot)
-                content.add(game.roomRoot)
-                updateSubscription = content.subscribe(to: SceneEvents.Update.self) { event in
-                    game.update(deltaTime: event.deltaTime)
-                    audio.setEngine(
-                        speedRatio: game.speedRatio,
-                        running: game.isEngineRunning,
-                        drifting: game.isDrifting
-                    )
-                }
-            } update: { content in
-                #if !targetEnvironment(simulator)
-                // One-way switch to the non-AR presentation.
-                if game.virtualModeActive {
-                    content.camera = .virtual
-                }
-                #endif
-            }
-            #if targetEnvironment(simulator)
-            .realityViewCameraControls(.orbit)
-            #else
-            .realityViewCameraControls(game.virtualModeActive ? .orbit : .none)
-            // AR: use the actual touch location rather than the camera center.
-            .onTapGesture(coordinateSpace: .local) { location in
-                placeCourse(at: location)
-            }
-            .simultaneousGesture(
-                DragGesture(minimumDistance: 15)
-                    .onChanged { value in
-                        if game.mode != .roomDrive,
-                           courseScaleAtPinchStart == nil,
-                           courseRotationAtGestureStart == nil {
-                            placeCourse(at: value.location)
-                        }
+                    content.add(game.anchorRoot)
+                    content.add(game.roomRoot)
+                    updateSubscription = content.subscribe(to: SceneEvents.Update.self) { event in
+                        game.update(deltaTime: event.deltaTime)
+                        audio.setEngine(
+                            speedRatio: game.speedRatio,
+                            running: game.isEngineRunning,
+                            drifting: game.isDrifting
+                        )
                     }
-            )
-            .simultaneousGesture(courseScaleGesture)
-            .simultaneousGesture(courseRotationGesture)
-            #endif
-            .onGeometryChange(for: CGSize.self, of: { $0.size }) {
-                realityViewSize = $0
-            }
-            .ignoresSafeArea()
+                } update: { content in
+                    #if !targetEnvironment(simulator)
+                    // One-way switch to the non-AR presentation.
+                    if game.virtualModeActive {
+                        content.camera = .virtual
+                    }
+                    #endif
+                }
+                #if targetEnvironment(simulator)
+                .realityViewCameraControls(.orbit)
+                #else
+                .realityViewCameraControls(game.virtualModeActive ? .orbit : .none)
+                // AR: use the actual touch location rather than the camera center.
+                .onTapGesture(coordinateSpace: .local) { location in
+                    placeCourse(at: location)
+                }
+                .simultaneousGesture(
+                    DragGesture(minimumDistance: 15)
+                        .onChanged { value in
+                            if game.mode != .roomDrive,
+                               courseScaleAtPinchStart == nil,
+                               courseRotationAtGestureStart == nil {
+                                placeCourse(at: value.location)
+                            }
+                        }
+                )
+                .simultaneousGesture(courseScaleGesture)
+                .simultaneousGesture(courseRotationGesture)
+                #endif
+                .onGeometryChange(for: CGSize.self, of: { $0.size }) {
+                    realityViewSize = $0
+                }
+                .ignoresSafeArea()
 
-            GameOverlayView(
-                game: game,
-                roomPlanSupported: roomPlanSupported && !game.virtualModeActive,
-                canScanRoom: canScanRoom,
-                onScanRoom: startRoomScan
-            )
+                GameOverlayView(
+                    game: game,
+                    roomPlanSupported: roomPlanSupported && !game.virtualModeActive,
+                    canScanRoom: canScanRoom,
+                    onScanRoom: startRoomScan
+                )
 
-            if cameraAccessDenied && !game.virtualModeActive {
-                CameraDeniedView { game.activateVirtualMode() }
+                if cameraAccessDenied && !game.virtualModeActive {
+                    CameraDeniedView { game.activateVirtualMode() }
+                }
+            } else {
+                TitleView(onStart: enterGame)
             }
         }
         .persistentSystemOverlays(.hidden)
@@ -106,13 +111,13 @@ struct ContentView: View {
                 audio.handle(event)
                 haptics.handle(event)
             }
-            updateTiltSteering()
-            refreshCameraAuthorization()
-            await runSpatialTracking()
         }
-        .onChange(of: game.tiltSteeringEnabled) { updateTiltSteering() }
+        .onChange(of: game.tiltSteeringEnabled) {
+            guard hasEnteredGame else { return }
+            updateTiltSteering()
+        }
         .onChange(of: scenePhase) {
-            if scenePhase == .active {
+            if hasEnteredGame, scenePhase == .active {
                 refreshCameraAuthorization()
                 Task { await runSpatialTracking() }
             }
@@ -142,6 +147,15 @@ struct ContentView: View {
         } message: {
             Text(roomScanError ?? "")
         }
+    }
+
+    private func enterGame() {
+        withAnimation(.easeInOut(duration: 0.35)) {
+            hasEnteredGame = true
+        }
+        updateTiltSteering()
+        refreshCameraAuthorization()
+        Task { await runSpatialTracking() }
     }
 
     private var roomPlanSupported: Bool {
