@@ -11,6 +11,11 @@ struct PeerRaceLobbyView: View {
 
     var body: some View {
         VStack(spacing: 10) {
+            carSelectionControls
+
+            Divider()
+                .overlay(.white.opacity(0.25))
+
             switch multiplayer.state {
             case .idle:
                 idleControls
@@ -28,6 +33,52 @@ struct PeerRaceLobbyView: View {
         .foregroundStyle(.white)
         .padding(12)
         .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 14))
+    }
+
+    private var carSelectionControls: some View {
+        VStack(spacing: 7) {
+            HStack(spacing: 14) {
+                carChoiceLabel("自分", choice: multiplayer.localCarChoice)
+                if multiplayer.state == .connected {
+                    carChoiceLabel("相手", choice: multiplayer.remoteCarChoice)
+                }
+            }
+
+            Picker(
+                "自分の車",
+                selection: Binding(
+                    get: { multiplayer.localCarChoice },
+                    set: { multiplayer.setLocalCarChoice($0) }
+                )
+            ) {
+                ForEach(RaceCarChoice.allCases) { choice in
+                    Text(choice.displayName)
+                        .tag(choice)
+                }
+            }
+            .pickerStyle(.segmented)
+        }
+    }
+
+    private func carChoiceLabel(
+        _ player: String, choice: RaceCarChoice?
+    ) -> some View {
+        Label(
+            "\(player): \(choice?.displayName ?? "確認中")",
+            systemImage: "car.side.fill"
+        )
+        .font(.caption.bold())
+        .foregroundStyle(carColor(choice))
+    }
+
+    private func carColor(_ choice: RaceCarChoice?) -> Color {
+        switch choice {
+        case .green: .green
+        case .red: .red
+        case .blue: .blue
+        case .white: .white
+        case nil: .white.opacity(0.65)
+        }
     }
 
     private var idleControls: some View {
@@ -149,7 +200,7 @@ struct PeerRaceLobbyView: View {
             }
             .buttonStyle(.borderedProminent)
             .tint(multiplayer.localReady ? .gray : .green)
-            .disabled(!multiplayer.isCourseSynchronized)
+            .disabled(!multiplayer.canSetReady)
 
             if multiplayer.role == .host {
                 Button {

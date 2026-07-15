@@ -200,6 +200,12 @@ struct ContentView: View {
         multiplayer.onCarState = { [weak game] state in
             game?.applyPeerCarState(state)
         }
+        multiplayer.onLocalCarChoiceChanged = { [weak game] choice in
+            game?.setPeerRaceLocalCar(choice)
+        }
+        multiplayer.onRemoteCarChoiceChanged = { [weak game] choice in
+            game?.setPeerRaceRemoteCar(choice)
+        }
         multiplayer.onFinishResult = { [weak game] position, raceTime in
             game?.finishPeerRace(position: position, raceTime: raceTime)
         }
@@ -210,6 +216,8 @@ struct ContentView: View {
         game.onPeerRaceLocalFinish = { [weak multiplayer] raceTime in
             multiplayer?.reportLocalFinish(raceTime: raceTime)
         }
+        game.setPeerRaceLocalCar(multiplayer.localCarChoice)
+        game.setPeerRaceRemoteCar(multiplayer.remoteCarChoice)
     }
 
     private var roomPlanSupported: Bool {

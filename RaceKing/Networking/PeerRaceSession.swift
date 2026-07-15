@@ -48,6 +48,7 @@ final class PeerRaceSession {
     private static let maximumPacketSize = 64 * 1024 * 1024
     private static let maximumWorldMapSize = 40 * 1024 * 1024
     private static let snapshotInterval: TimeInterval = 1.0 / 20.0
+    private static let carChoiceDefaultsKey = "peerRaceCarChoice"
 
     private(set) var state: State = .idle
     private(set) var role: Role?
@@ -58,14 +59,23 @@ final class PeerRaceSession {
     private(set) var raceComplete = false
     private(set) var errorMessage: String?
     private(set) var courseSyncState: CourseSyncState = .unavailable
+    private(set) var localCarChoice = RaceCarChoice(
+        rawValue: UserDefaults.standard.string(forKey: "peerRaceCarChoice") ?? ""
+    ) ?? .green
+    private(set) var remoteCarChoice: RaceCarChoice?
 
     var canStartRace: Bool {
         state == .connected && role == .host
             && courseSyncState == .synchronized
+            && remoteCarChoice != nil
             && localReady && remoteReady
     }
 
     var isCourseSynchronized: Bool { courseSyncState == .synchronized }
+
+    var canSetReady: Bool {
+        state == .connected && isCourseSynchronized && remoteCarChoice != nil
+    }
 
     var canRequestCourseShare: Bool {
         guard state == .connected, role == .host else { return false }
@@ -90,6 +100,8 @@ final class PeerRaceSession {
     @ObservationIgnored var onStartRace: (() -> Void)?
     @ObservationIgnored var onResetRace: (() -> Void)?
     @ObservationIgnored var onCarState: ((PeerRacePacket.CarState) -> Void)?
+    @ObservationIgnored var onLocalCarChoiceChanged: ((RaceCarChoice) -> Void)?
+    @ObservationIgnored var onRemoteCarChoiceChanged: ((RaceCarChoice?) -> Void)?
     @ObservationIgnored var onFinishResult: ((Int, TimeInterval) -> Void)?
     @ObservationIgnored var onConnectionChanged: ((Bool) -> Void)?
     @ObservationIgnored var onCourseMapRequested: (() -> Void)?
@@ -171,9 +183,24 @@ final class PeerRaceSession {
     }
 
     func setReady(_ ready: Bool) {
-        guard state == .connected, isCourseSynchronized else { return }
+        guard state == .connected else { return }
+        guard !ready || canSetReady else { return }
         localReady = ready
         send(.ready(ready))
+    }
+
+    /// Persists the local choice and immediately shares it with a connected peer.
+    /// A car change invalidates this player's previous ready confirmation.
+    func setLocalCarChoice(_ choice: RaceCarChoice) {
+        guard choice != localCarChoice else { return }
+        localCarChoice = choice
+        UserDefaults.standard.set(choice.rawValue, forKey: Self.carChoiceDefaultsKey)
+        onLocalCarChoiceChanged?(choice)
+
+        guard state == .connected else { return }
+        localReady = false
+        send(.carSelection(choice))
+        send(.ready(false))
     }
 
     /// Starts host-side world-map capture. The view owning ARSession supplies the map.
@@ -274,6 +301,8 @@ final class PeerRaceSession {
         receiveBuffer.removeAll(keepingCapacity: true)
         rooms = []
         peerName = nil
+        remoteCarChoice = nil
+        onRemoteCarChoiceChanged?(nil)
         role = nil
         state = .idle
         courseSyncState = .unavailable
@@ -363,7 +392,7 @@ final class PeerRaceSession {
             resetRoundState()
             resetCourseSyncState()
             receiveNextChunk(from: connection)
-            send(.hello(name: UIDevice.current.name))
+            send(.hello(name: UIDevice.current.name, carChoice: localCarChoice))
             onConnectionChanged?(true)
         case .failed(let error):
             fail("対戦相手との接続が切れました: \(error.localizedDescription)")
@@ -457,14 +486,20 @@ final class PeerRaceSession {
     private func handle(_ packet: PeerRacePacket) {
         switch packet.kind {
         case .hello:
-            guard packet.protocolVersion == 2 else {
+            guard packet.protocolVersion == PeerRacePacket.currentVersion else {
                 fail("アプリのバージョンが対戦相手と一致しません")
                 return
             }
+            guard let carChoice = packet.carChoice else {
+                fail("対戦相手の車情報を読み取れませんでした")
+                return
+            }
             peerName = packet.name?.isEmpty == false ? packet.name : "対戦相手"
+            remoteCarChoice = carChoice
+            onRemoteCarChoiceChanged?(carChoice)
         case .ready:
             if let isReady = packet.isReady,
-               !isReady || isCourseSynchronized {
+               !isReady || (isCourseSynchronized && remoteCarChoice != nil) {
                 remoteReady = isReady
             }
         case .courseSyncStarted:
@@ -510,8 +545,14 @@ final class PeerRaceSession {
             remoteReady = false
             courseSyncState = .failed(message)
             onCourseSyncInvalidated?()
+        case .carSelection:
+            guard let carChoice = packet.carChoice else { return }
+            remoteCarChoice = carChoice
+            remoteReady = false
+            onRemoteCarChoiceChanged?(carChoice)
         case .startRace:
-            guard role == .guest, isCourseSynchronized else { return }
+            guard role == .guest, isCourseSynchronized,
+                  remoteCarChoice != nil else { return }
             resetFinishState()
             onStartRace?()
         case .carState:

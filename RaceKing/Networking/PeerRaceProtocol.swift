@@ -14,6 +14,7 @@ struct PeerRacePacket: Codable, Sendable {
         case courseMap
         case courseMapApplied
         case courseMapFailed
+        case carSelection
         case startRace
         case carState
         case finish
@@ -51,6 +52,7 @@ struct PeerRacePacket: Codable, Sendable {
     var name: String?
     var protocolVersion: Int?
     var isReady: Bool?
+    var carChoice: RaceCarChoice?
     var coursePlacement: CoursePlacement?
     var worldMapData: Data?
     var message: String?
@@ -58,8 +60,15 @@ struct PeerRacePacket: Codable, Sendable {
     var raceTime: TimeInterval?
     var position: Int?
 
-    static func hello(name: String) -> Self {
-        Self(kind: .hello, name: name, protocolVersion: 2)
+    static let currentVersion = 3
+
+    static func hello(name: String, carChoice: RaceCarChoice) -> Self {
+        Self(
+            kind: .hello,
+            name: name,
+            protocolVersion: currentVersion,
+            carChoice: carChoice
+        )
     }
 
     static func ready(_ isReady: Bool) -> Self {
@@ -82,6 +91,10 @@ struct PeerRacePacket: Codable, Sendable {
 
     static func courseMapFailed(_ message: String) -> Self {
         Self(kind: .courseMapFailed, message: message)
+    }
+
+    static func carSelection(_ choice: RaceCarChoice) -> Self {
+        Self(kind: .carSelection, carChoice: choice)
     }
 
     static var startRace: Self { Self(kind: .startRace) }

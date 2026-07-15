@@ -68,6 +68,7 @@ final class RaceGame {
     var mode: Mode = .timeAttack {
         didSet {
             guard phase == .ready, mode != oldValue else { return }
+            applyPlayerCarModel()
             placeCarsOnGrid()
         }
     }
@@ -215,6 +216,7 @@ final class RaceGame {
     private var wallHitCooldown: TimeInterval = 0
     private var playerTouchingWall = false
     private var peerIsHost = true
+    private var peerLocalCarChoice: RaceCarChoice = .green
     private var peerLocalFinished = false
     private var peerProgress: Float = 0
     private(set) var peerLapCount = 0
@@ -278,12 +280,8 @@ final class RaceGame {
         root.addChild(EntityFactory.makeTrack(layout: layout))
         root.addChild(car)
         root.addChild(ghostCar)
-        glowBlue = car.findEntity(named: "glowBlue")
-        glowOrange = car.findEntity(named: "glowOrange")
-        boostFlame = car.findEntity(named: "boostFlame")
-        peerGlowBlue = peerCar.findEntity(named: "glowBlue")
-        peerGlowOrange = peerCar.findEntity(named: "glowOrange")
-        peerBoostFlame = peerCar.findEntity(named: "boostFlame")
+        refreshPlayerCarEffects()
+        refreshPeerCarEffects()
         refreshRoomCarFootprint()
 
         let savedBest = UserDefaults.standard.double(forKey: bestLapKey)
@@ -496,12 +494,12 @@ final class RaceGame {
     /// Applies an imported car model to the player and ghost cars in place
     /// (nil restores the procedural kart). Safe to call mid-race.
     func setCustomCarModel(_ template: Entity?) {
-        EntityFactory.populate(car, bodyColor: EntityFactory.playerBodyColor, customTemplate: template)
-        EntityFactory.populate(ghostCar, bodyColor: EntityFactory.ghostBodyColor, customTemplate: template)
-        glowBlue = car.findEntity(named: "glowBlue")
-        glowOrange = car.findEntity(named: "glowOrange")
-        boostFlame = car.findEntity(named: "boostFlame")
-        refreshRoomCarFootprint()
+        EntityFactory.populate(
+            ghostCar,
+            bodyColor: EntityFactory.ghostBodyColor,
+            customTemplate: template
+        )
+        applyPlayerCarModel(customTemplate: template)
     }
 
     /// Applies an imported model to one AI kart (nil restores its tinted kart).
@@ -511,6 +509,18 @@ final class RaceGame {
     }
 
     // MARK: - Nearby two-player race
+
+    func setPeerRaceLocalCar(_ choice: RaceCarChoice) {
+        peerLocalCarChoice = choice
+        if mode == .peerRace {
+            applyPlayerCarModel()
+        }
+    }
+
+    func setPeerRaceRemoteCar(_ choice: RaceCarChoice?) {
+        EntityFactory.populateRaceCar(peerCar, choice: choice ?? .blue)
+        refreshPeerCarEffects()
+    }
 
     func setPeerRole(isHost: Bool) {
         guard phase == .ready else { return }
@@ -1104,6 +1114,36 @@ final class RaceGame {
         guard car.parent !== parent else { return }
         car.removeFromParent()
         parent.addChild(car)
+    }
+
+    /// Uses synchronized built-in models only for nearby races; the regular
+    /// imported player model remains intact for every other game mode.
+    private func applyPlayerCarModel(
+        customTemplate: Entity? = EntityFactory.customCarTemplate
+    ) {
+        if mode == .peerRace {
+            EntityFactory.populateRaceCar(car, choice: peerLocalCarChoice)
+        } else {
+            EntityFactory.populate(
+                car,
+                bodyColor: EntityFactory.playerBodyColor,
+                customTemplate: customTemplate
+            )
+        }
+        refreshPlayerCarEffects()
+        refreshRoomCarFootprint()
+    }
+
+    private func refreshPlayerCarEffects() {
+        glowBlue = car.findEntity(named: "glowBlue")
+        glowOrange = car.findEntity(named: "glowOrange")
+        boostFlame = car.findEntity(named: "boostFlame")
+    }
+
+    private func refreshPeerCarEffects() {
+        peerGlowBlue = peerCar.findEntity(named: "glowBlue")
+        peerGlowOrange = peerCar.findEntity(named: "glowOrange")
+        peerBoostFlame = peerCar.findEntity(named: "boostFlame")
     }
 
     private func applyRoomVisualizationSettings() {

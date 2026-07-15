@@ -116,6 +116,11 @@ enum EntityFactory {
         try? Entity.load(named: "AICar\(index + 1)")
     }
 
+    /// Loads one of the four built-in cars shared by every nearby-race client.
+    static func bundledRaceCarTemplate(for choice: RaceCarChoice) -> Entity? {
+        try? Entity.load(named: choice.resourceName)
+    }
+
     /// Models for the AI karts: an imported file wins over the bundled
     /// default; nil slots fall back to the tinted procedural kart.
     static var aiCarTemplates: [Entity?] = (0..<3).map { index in
@@ -139,6 +144,26 @@ enum EntityFactory {
         let car = Entity()
         populate(car, bodyColor: bodyColor, customTemplate: allowCustomModel ? customCarTemplate : nil)
         return car
+    }
+
+    /// Replaces a car with a synchronized built-in model. The color is also
+    /// used by the procedural fallback if the bundled USDZ cannot be loaded.
+    static func populateRaceCar(_ car: Entity, choice: RaceCarChoice) {
+        let fallbackColor: SimpleMaterial.Color = switch choice {
+        case .green:
+            .init(red: 0.08, green: 0.42, blue: 0.2, alpha: 1)
+        case .red:
+            .init(red: 0.9, green: 0.12, blue: 0.15, alpha: 1)
+        case .blue:
+            .init(red: 0.2, green: 0.45, blue: 0.95, alpha: 1)
+        case .white:
+            .init(white: 0.9, alpha: 1)
+        }
+        populate(
+            car,
+            bodyColor: fallbackColor,
+            customTemplate: bundledRaceCarTemplate(for: choice)
+        )
     }
 
     /// Replaces a car's body (custom model or procedural kart) in place,
