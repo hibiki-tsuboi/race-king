@@ -21,8 +21,6 @@ struct ModeSelectionView: View {
             )
 
             ZStack {
-                background
-
                 VStack(spacing: 18) {
                     HStack {
                         Button(action: onBack) {
@@ -79,6 +77,7 @@ struct ModeSelectionView: View {
                 .padding(.top, max(16, proxy.safeAreaInsets.top))
                 .padding(.bottom, max(16, proxy.safeAreaInsets.bottom))
             }
+            .background { background }
         }
     }
 
@@ -168,30 +167,12 @@ struct ModeSelectionView: View {
     }
 
     private var background: some View {
-        ZStack {
-            LinearGradient(
-                colors: [
-                    Color(red: 0.015, green: 0.025, blue: 0.06),
-                    Color(red: 0.03, green: 0.12, blue: 0.22),
-                    Color(red: 0.02, green: 0.02, blue: 0.04),
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-
-            Circle()
-                .fill(.blue.opacity(0.24))
-                .frame(width: 380, height: 380)
-                .blur(radius: 90)
-                .offset(x: 150, y: -220)
-
-            Circle()
-                .fill(.red.opacity(0.16))
-                .frame(width: 320, height: 320)
-                .blur(radius: 90)
-                .offset(x: -170, y: 270)
-        }
-        .ignoresSafeArea()
+        Image("MenuBackground")
+            .resizable()
+            .scaledToFill()
+            .overlay(.black.opacity(0.18))
+            .accessibilityHidden(true)
+            .ignoresSafeArea()
     }
 }
 
