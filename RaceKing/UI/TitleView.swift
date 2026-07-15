@@ -40,7 +40,7 @@ struct TitleView: View {
                     .buttonStyle(.plain)
                     .contentShape(Capsule())
                     .accessibilityLabel("遊ぶモードを選択")
-                    .padding(.bottom, max(104, proxy.size.height * 0.16))
+                    .padding(.bottom, max(72, proxy.size.height * 0.12))
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
