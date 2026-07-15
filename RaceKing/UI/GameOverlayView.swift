@@ -203,18 +203,9 @@ struct GameOverlayView: View {
 
     private var readyMenu: some View {
         VStack(spacing: 14) {
-                HStack(spacing: 10) {
-                    Label(selectedModeTitle, systemImage: selectedModeSystemImage)
-                        .font(.callout.weight(.black))
-                        .foregroundStyle(.white)
-
-                    Button(action: onChooseMode) {
-                        Label("モード変更", systemImage: "arrow.left.circle.fill")
-                            .font(.caption.bold())
-                    }
-                    .buttonStyle(.bordered)
-                    .tint(.white)
-                }
+            Label(selectedModeTitle, systemImage: selectedModeSystemImage)
+                .font(.callout.weight(.black))
+                .foregroundStyle(.white)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
                 .background(.black.opacity(0.45), in: Capsule())
