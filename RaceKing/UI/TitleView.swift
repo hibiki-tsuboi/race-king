@@ -5,7 +5,7 @@
 
 import SwiftUI
 
-/// Branded entry screen shown before AR and course placement begin.
+/// Branded entry screen shown before game-mode selection begins.
 struct TitleView: View {
     var onStart: () -> Void
 
@@ -116,7 +116,7 @@ struct TitleView: View {
                         .scaleEffect(isStartHighlighted ? 1.025 : 1)
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel("ゲームを開始")
+                    .accessibilityLabel("遊ぶモードを選択")
 
                     Text("どこでも、そこがサーキット。")
                         .font(.callout.bold())

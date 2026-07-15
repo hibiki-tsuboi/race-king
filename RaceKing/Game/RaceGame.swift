@@ -300,6 +300,12 @@ final class RaceGame {
         anchorRoot.components.set(AnchoringComponent(Self.courseSurfaceAnchorTarget))
     }
 
+    /// Room driving and the virtual camera do not use the tabletop anchor.
+    func removeCourseSurfaceAnchor() {
+        anchorRoot.components.remove(AnchoringComponent.self)
+        isCourseAnchored = true
+    }
+
     /// Captures the course root in AR world coordinates for a nearby guest.
     func sharedCoursePlacement() -> PeerRacePacket.CoursePlacement? {
         guard phase == .ready, mode == .peerRace, isCourseAnchored else { return nil }

@@ -7,13 +7,14 @@ import SwiftUI
 import RealityKit
 import UniformTypeIdentifiers
 
-/// HUD, touch controls, countdown, mode select, and results layered over the AR view.
+/// HUD, touch controls, race setup, and results layered over the AR view.
 struct GameOverlayView: View {
     @Bindable var game: RaceGame
     @Bindable var multiplayer: PeerRaceSession
     var roomPlanSupported = false
     var canScanRoom = false
     var onScanRoom: () -> Void = {}
+    var onChooseMode: () -> Void = {}
 
     var body: some View {
         ZStack {
@@ -70,6 +71,12 @@ struct GameOverlayView: View {
                         }
                         .buttonStyle(.plain)
                     }
+                    Button(action: onChooseMode) {
+                        Label("モード選択に戻る", systemImage: "chevron.left")
+                            .font(.callout.bold())
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(.white)
                 }
                 .padding(22)
                 .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 16))
@@ -163,6 +170,22 @@ struct GameOverlayView: View {
 
     private var readyMenu: some View {
         VStack(spacing: 14) {
+                HStack(spacing: 10) {
+                    Label(selectedModeTitle, systemImage: selectedModeSystemImage)
+                        .font(.callout.weight(.black))
+                        .foregroundStyle(.white)
+
+                    Button(action: onChooseMode) {
+                        Label("モード変更", systemImage: "arrow.left.circle.fill")
+                            .font(.caption.bold())
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(.white)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(.black.opacity(0.45), in: Capsule())
+
                 #if !targetEnvironment(simulator)
                 Text(placementInstruction)
                     .font(.callout.bold())
@@ -171,19 +194,6 @@ struct GameOverlayView: View {
                     .padding(10)
                     .background(.black.opacity(0.5), in: RoundedRectangle(cornerRadius: 10))
                 #endif
-
-                Picker("モード", selection: $game.mode) {
-                    Text("TIME").tag(RaceGame.Mode.timeAttack)
-                    Text("VS AI").tag(RaceGame.Mode.race)
-                    Text("2人").tag(RaceGame.Mode.peerRace)
-                    if roomPlanSupported {
-                        Text("部屋").tag(RaceGame.Mode.roomDrive)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .frame(maxWidth: roomPlanSupported ? 360 : 330)
-                .padding(6)
-                .background(.black.opacity(0.4), in: RoundedRectangle(cornerRadius: 12))
 
                 if game.mode == .peerRace {
                     PeerRaceLobbyView(multiplayer: multiplayer)
@@ -209,6 +219,24 @@ struct GameOverlayView: View {
         // collides with the HUD on small screens and leaves the grid visible.
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .padding(.top, 170)
+    }
+
+    private var selectedModeTitle: String {
+        switch game.mode {
+        case .timeAttack: "タイムアタック"
+        case .race: "CPU対戦"
+        case .peerRace: "ネットワーク対戦"
+        case .roomDrive: "フリー走行"
+        }
+    }
+
+    private var selectedModeSystemImage: String {
+        switch game.mode {
+        case .timeAttack: "stopwatch.fill"
+        case .race: "person.3.fill"
+        case .peerRace: "wifi"
+        case .roomDrive: "viewfinder"
+        }
     }
 
     private var placementInstruction: String {

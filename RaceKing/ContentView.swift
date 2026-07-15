@@ -10,6 +10,12 @@ import RoomPlan
 import SwiftUI
 
 struct ContentView: View {
+    private enum AppScreen: Equatable {
+        case title
+        case modeSelection
+        case game
+    }
+
     @State private var game = RaceGame()
     @State private var audio = GameAudio()
     @State private var haptics = Haptics()
@@ -22,17 +28,19 @@ struct ContentView: View {
     @State private var showingRoomScan = false
     @State private var isPreparingRoomScan = false
     @State private var isConfiguringSpatialTracking = false
+    @State private var isStoppingSpatialTracking = false
     @State private var roomScanError: String?
     @State private var courseScaleAtPinchStart: Float?
     @State private var courseRotationAtGestureStart: Float?
     @State private var realityViewSize = CGSize.zero
     @State private var updateSubscription: EventSubscription?
-    @State private var hasEnteredGame = false
+    @State private var screen: AppScreen = .title
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         ZStack {
-            if hasEnteredGame {
+            switch screen {
+            case .game:
                 RealityView { content in
                     #if targetEnvironment(simulator)
                     // No AR passthrough here: fake a floor and look down at the circuit.
@@ -41,12 +49,21 @@ struct ContentView: View {
                     camera.look(at: .zero, from: [0, 1.9, 2.4], relativeTo: nil)
                     content.add(camera)
                     #else
-                    // AR: show the real room and anchor the circuit to the floor.
-                    content.camera = .spatialTracking
-                    game.installCourseSurfaceAnchor()
-                    // Camera pose feed for aim-based course placement.
-                    game.cameraRig.components.set(AnchoringComponent(.camera))
-                    content.add(game.cameraRig)
+                    if game.virtualModeActive {
+                        content.camera = .virtual
+                        game.removeCourseSurfaceAnchor()
+                    } else {
+                        // AR starts only after the player chooses a mode.
+                        content.camera = .spatialTracking
+                        if game.mode == .roomDrive {
+                            game.removeCourseSurfaceAnchor()
+                        } else {
+                            game.installCourseSurfaceAnchor()
+                        }
+                        // Camera pose feed for aim-based course placement.
+                        game.cameraRig.components.set(AnchoringComponent(.camera))
+                        content.add(game.cameraRig)
+                    }
                     #endif
 
                     content.add(game.anchorRoot)
@@ -106,14 +123,26 @@ struct ContentView: View {
                     multiplayer: multiplayer,
                     roomPlanSupported: roomPlanSupported && !game.virtualModeActive,
                     canScanRoom: canScanRoom,
-                    onScanRoom: startRoomScan
+                    onScanRoom: startRoomScan,
+                    onChooseMode: returnToModeSelection
                 )
 
                 if cameraAccessDenied && !game.virtualModeActive {
                     CameraDeniedView { game.activateVirtualMode() }
                 }
-            } else {
-                TitleView(onStart: enterGame)
+            case .modeSelection:
+                ModeSelectionView(
+                    roomDriveAvailable: roomPlanSupported
+                        && !game.virtualModeActive
+                        && !cameraAccessDenied,
+                    isPreparing: isStoppingSpatialTracking,
+                    onSelect: enterGame,
+                    onBack: returnToTitle
+                )
+                .transition(.opacity.combined(with: .scale(scale: 0.98)))
+            case .title:
+                TitleView(onStart: showModeSelection)
+                    .transition(.opacity)
             }
         }
         .persistentSystemOverlays(.hidden)
@@ -125,7 +154,7 @@ struct ContentView: View {
             configureMultiplayer()
         }
         .onChange(of: game.tiltSteeringEnabled) {
-            guard hasEnteredGame else { return }
+            guard screen == .game else { return }
             updateTiltSteering()
         }
         .onChange(of: game.mode) {
@@ -139,16 +168,20 @@ struct ContentView: View {
             }
         }
         .onChange(of: scenePhase) {
-            if hasEnteredGame, scenePhase == .active {
+            if screen == .game, scenePhase == .active {
                 refreshCameraAuthorization()
                 Task { await runSpatialTracking() }
-            } else if scenePhase == .background, game.mode == .peerRace {
+            } else if screen == .game, scenePhase == .background,
+                      game.mode == .peerRace {
                 multiplayer.disconnect()
             }
         }
         .fullScreenCover(
             isPresented: $showingRoomScan,
-            onDismiss: { Task { await runSpatialTracking() } }
+            onDismiss: {
+                guard screen == .game else { return }
+                Task { await runSpatialTracking() }
+            }
         ) {
             RoomScanView(
                 arSession: arSession,
@@ -173,13 +206,54 @@ struct ContentView: View {
         }
     }
 
-    private func enterGame() {
+    private func showModeSelection() {
+        refreshCameraAuthorization()
+        withAnimation(.easeInOut(duration: 0.3)) {
+            screen = .modeSelection
+        }
+    }
+
+    private func enterGame(_ mode: RaceGame.Mode) {
+        guard !isStoppingSpatialTracking else { return }
+        if game.phase != .ready {
+            game.reset()
+        }
+        if multiplayer.state != .idle {
+            multiplayer.disconnect()
+        }
+        game.mode = mode
         withAnimation(.easeInOut(duration: 0.35)) {
-            hasEnteredGame = true
+            screen = .game
         }
         updateTiltSteering()
         refreshCameraAuthorization()
         Task { await runSpatialTracking() }
+    }
+
+    private func returnToModeSelection() {
+        guard game.phase == .ready else { return }
+        multiplayer.disconnect()
+        updateSubscription = nil
+        tilt.stop()
+        game.steeringInput = 0
+        isPreparingRoomScan = false
+        courseScaleAtPinchStart = nil
+        courseRotationAtGestureStart = nil
+        arSession.pause()
+        isStoppingSpatialTracking = true
+        withAnimation(.easeInOut(duration: 0.3)) {
+            screen = .modeSelection
+        }
+        Task {
+            await spatialTrackingSession.stop()
+            isStoppingSpatialTracking = false
+        }
+    }
+
+    private func returnToTitle() {
+        withAnimation(.easeInOut(duration: 0.3)) {
+            screen = .title
+        }
     }
 
     private func configureMultiplayer() {
@@ -256,6 +330,10 @@ struct ContentView: View {
         isPreparingRoomScan = true
         Task {
             await spatialTrackingSession.stop()
+            guard screen == .game, game.mode == .roomDrive else {
+                isPreparingRoomScan = false
+                return
+            }
             showingRoomScan = true
             isPreparingRoomScan = false
         }
@@ -274,7 +352,7 @@ struct ContentView: View {
     /// scanned room's world coordinate system when capture finishes.
     private func runSpatialTracking() async {
         #if !targetEnvironment(simulator)
-        guard !showingRoomScan, !game.virtualModeActive,
+        guard screen == .game, !showingRoomScan, !game.virtualModeActive,
               !isConfiguringSpatialTracking else { return }
         isConfiguringSpatialTracking = true
         defer { isConfiguringSpatialTracking = false }
@@ -294,6 +372,7 @@ struct ContentView: View {
             cameraAccessDenied = true
             return
         }
+        guard screen == .game, !game.virtualModeActive else { return }
         // With the custom-session overload, the app owns the ARSession
         // lifecycle. SpatialTrackingSession connects it to RealityKit, but
         // doesn't start camera capture on the app's behalf.
