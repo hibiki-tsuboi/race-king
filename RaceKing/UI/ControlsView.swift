@@ -22,17 +22,15 @@ struct ControlsView: View {
             Spacer()
             HStack(alignment: .bottom, spacing: 16) {
                 HoldButton(
-                    systemImage: "pedal.brake",
-                    pressedSystemImage: "pedal.brake.fill",
-                    size: 62,
-                    tint: .blue,
+                    systemImage: brakeSystemImage,
+                    pressedSystemImage: pressedBrakeSystemImage,
+                    size: 72,
                     isPressed: brake
                 )
                 HoldButton(
                     systemImage: "pedal.accelerator",
                     pressedSystemImage: "pedal.accelerator.fill",
-                    size: 90,
-                    tint: .red,
+                    size: 88,
                     isPressed: throttle
                 )
             }
@@ -51,6 +49,14 @@ struct ControlsView: View {
 
     private var brake: Binding<Bool> {
         Binding { game.brakeInput } set: { game.brakeInput = $0 }
+    }
+
+    private var brakeSystemImage: String {
+        game.speedRatio > 0.01 ? "pedal.brake" : "r.square"
+    }
+
+    private var pressedBrakeSystemImage: String {
+        game.speedRatio > 0.01 ? "pedal.brake.fill" : "r.square.fill"
     }
 }
 
