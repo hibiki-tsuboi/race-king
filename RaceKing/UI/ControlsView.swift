@@ -15,14 +15,26 @@ struct ControlsView: View {
         HStack(alignment: .bottom) {
             if !game.tiltSteeringEnabled {
                 HStack(spacing: 16) {
-                    HoldButton(systemImage: "arrowtriangle.left.fill", size: 78, isPressed: $steerLeft)
-                    HoldButton(systemImage: "arrowtriangle.right.fill", size: 78, isPressed: $steerRight)
+                    HoldButton(systemImage: "steeringwheel.arrowtriangle.left", size: 78, isPressed: $steerLeft)
+                    HoldButton(systemImage: "steeringwheel.arrowtriangle.right", size: 78, isPressed: $steerRight)
                 }
             }
             Spacer()
             HStack(alignment: .bottom, spacing: 16) {
-                HoldButton(systemImage: "arrowtriangle.down.fill", size: 62, tint: .blue, isPressed: brake)
-                HoldButton(systemImage: "arrowtriangle.up.fill", size: 90, tint: .red, isPressed: throttle)
+                HoldButton(
+                    systemImage: "pedal.brake",
+                    pressedSystemImage: "pedal.brake.fill",
+                    size: 62,
+                    tint: .blue,
+                    isPressed: brake
+                )
+                HoldButton(
+                    systemImage: "pedal.accelerator",
+                    pressedSystemImage: "pedal.accelerator.fill",
+                    size: 90,
+                    tint: .red,
+                    isPressed: throttle
+                )
             }
         }
         .onChange(of: steerLeft) { updateSteering() }
@@ -45,12 +57,13 @@ struct ControlsView: View {
 /// A round button that reports being held down, like a physical pedal.
 struct HoldButton: View {
     let systemImage: String
+    var pressedSystemImage: String? = nil
     var size: CGFloat = 70
     var tint: Color = .white
     @Binding var isPressed: Bool
 
     var body: some View {
-        Image(systemName: systemImage)
+        Image(systemName: isPressed ? (pressedSystemImage ?? systemImage) : systemImage)
             .font(.system(size: size * 0.36, weight: .bold))
             .foregroundStyle(.white)
             .frame(width: size, height: size)
