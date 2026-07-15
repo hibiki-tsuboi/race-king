@@ -10,6 +10,10 @@ struct PeerRacePacket: Codable, Sendable {
     enum Kind: String, Codable, Sendable {
         case hello
         case ready
+        case courseSyncStarted
+        case courseMap
+        case courseMapApplied
+        case courseMapFailed
         case startRace
         case carState
         case finish
@@ -31,20 +35,53 @@ struct PeerRacePacket: Codable, Sendable {
         let driftChargeLevel: Int
     }
 
+    /// The course root's rigid pose in the host AR world's coordinates.
+    struct CoursePlacement: Codable, Sendable {
+        let x: Float
+        let y: Float
+        let z: Float
+        let quaternionX: Float
+        let quaternionY: Float
+        let quaternionZ: Float
+        let quaternionW: Float
+        let scale: Float
+    }
+
     let kind: Kind
     var name: String?
     var protocolVersion: Int?
     var isReady: Bool?
+    var coursePlacement: CoursePlacement?
+    var worldMapData: Data?
+    var message: String?
     var carState: CarState?
     var raceTime: TimeInterval?
     var position: Int?
 
     static func hello(name: String) -> Self {
-        Self(kind: .hello, name: name, protocolVersion: 1)
+        Self(kind: .hello, name: name, protocolVersion: 2)
     }
 
     static func ready(_ isReady: Bool) -> Self {
         Self(kind: .ready, isReady: isReady)
+    }
+
+    static var courseSyncStarted: Self { Self(kind: .courseSyncStarted) }
+
+    static func courseMap(
+        data: Data, placement: CoursePlacement
+    ) -> Self {
+        Self(
+            kind: .courseMap,
+            coursePlacement: placement,
+            worldMapData: data
+        )
+    }
+
+    static var courseMapApplied: Self { Self(kind: .courseMapApplied) }
+
+    static func courseMapFailed(_ message: String) -> Self {
+        Self(kind: .courseMapFailed, message: message)
     }
 
     static var startRace: Self { Self(kind: .startRace) }

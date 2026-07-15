@@ -32,7 +32,8 @@ struct GameOverlayView: View {
     private var centerMessage: some View {
         switch game.phase {
         case .ready:
-            if game.mode != .roomDrive && !game.isCourseAnchored {
+            if game.mode != .roomDrive && !game.isCourseAnchored
+                && !(game.mode == .peerRace && multiplayer.state == .connected) {
                 // AR is still scanning: no horizontal course surface yet.
                 VStack(spacing: 14) {
                     ProgressView()
@@ -215,6 +216,15 @@ struct GameOverlayView: View {
             return game.hasScannedRoom
                 ? "床に向けてタップでスタート位置を決定"
                 : "まず部屋をスキャンしてください"
+        }
+        if game.mode == .peerRace, multiplayer.state == .connected {
+            if multiplayer.role == .guest {
+                return "ホストと同じ机・床を映してコースを位置合わせ"
+            }
+            if multiplayer.isCourseSynchronized {
+                return "共有したコースで2台同時にレースします"
+            }
+            return "ホスト側でコースを配置してから共有"
         }
         return "床やテーブルをタップしてコース移動\nドラッグで移動・二本指でサイズ／向き調整"
     }

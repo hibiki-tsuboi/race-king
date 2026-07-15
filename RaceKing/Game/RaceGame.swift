@@ -302,6 +302,116 @@ final class RaceGame {
         anchorRoot.components.set(AnchoringComponent(Self.courseSurfaceAnchorTarget))
     }
 
+    /// Captures the course root in AR world coordinates for a nearby guest.
+    func sharedCoursePlacement() -> PeerRacePacket.CoursePlacement? {
+        guard phase == .ready, mode == .peerRace, isCourseAnchored else { return nil }
+
+        let matrix = root.transformMatrix(relativeTo: nil)
+        let xAxis = SIMD3(matrix.columns.0.x, matrix.columns.0.y, matrix.columns.0.z)
+        let yAxis = SIMD3(matrix.columns.1.x, matrix.columns.1.y, matrix.columns.1.z)
+        let zAxis = SIMD3(matrix.columns.2.x, matrix.columns.2.y, matrix.columns.2.z)
+        let xLength = simd_length(xAxis)
+        let yLength = simd_length(yAxis)
+        let zLength = simd_length(zAxis)
+        guard xLength.isFinite, yLength.isFinite, zLength.isFinite,
+              xLength > 0.0001, yLength > 0.0001, zLength > 0.0001 else { return nil }
+
+        let rotationMatrix = simd_float3x3(columns: (
+            xAxis / xLength,
+            yAxis / yLength,
+            zAxis / zLength
+        ))
+        let quaternion = simd_normalize(simd_quatf(rotationMatrix)).vector
+        let translation = matrix.columns.3
+        guard translation.x.isFinite, translation.y.isFinite, translation.z.isFinite,
+              quaternion.x.isFinite, quaternion.y.isFinite,
+              quaternion.z.isFinite, quaternion.w.isFinite else { return nil }
+
+        return PeerRacePacket.CoursePlacement(
+            x: translation.x,
+            y: translation.y,
+            z: translation.z,
+            quaternionX: quaternion.x,
+            quaternionY: quaternion.y,
+            quaternionZ: quaternion.z,
+            quaternionW: quaternion.w,
+            scale: courseScale
+        )
+    }
+
+    /// Hides the guest's independent course until ARKit shares the host world.
+    func prepareForSharedCourse() {
+        guard phase == .ready, mode == .peerRace else { return }
+        root.isEnabled = false
+    }
+
+    func cancelSharedCoursePreparation() {
+        root.isEnabled = true
+    }
+
+    /// Returns a guest to an independently tracked surface after leaving a shared world.
+    func restoreLocalCoursePlacement() {
+        guard !virtualModeActive else {
+            root.isEnabled = true
+            return
+        }
+        anchorRoot.transform = .identity
+        anchorRoot.components.set(AnchoringComponent(Self.courseSurfaceAnchorTarget))
+        root.position = .zero
+        root.orientation = simd_quatf(angle: 0, axis: [0, 1, 0])
+        root.scale = SIMD3(repeating: courseScale)
+        courseRotation = 0
+        isCourseAnchored = false
+        root.isEnabled = true
+    }
+
+    /// Places the course at the host's pose after both sessions share a world origin.
+    func applySharedCoursePlacement(
+        _ placement: PeerRacePacket.CoursePlacement,
+        spatiallyAnchored: Bool
+    ) -> Bool {
+        let quaternionVector = SIMD4(
+            placement.quaternionX,
+            placement.quaternionY,
+            placement.quaternionZ,
+            placement.quaternionW
+        )
+        let quaternionLength = simd_length(quaternionVector)
+        guard phase == .ready, mode == .peerRace,
+              placement.x.isFinite, placement.y.isFinite, placement.z.isFinite,
+              abs(placement.x) < 1_000, abs(placement.y) < 1_000,
+              abs(placement.z) < 1_000,
+              quaternionLength.isFinite, quaternionLength > 0.0001,
+              placement.scale.isFinite,
+              (Self.minimumCourseScale...Self.maximumCourseScale).contains(placement.scale)
+        else { return false }
+
+        let rotation = simd_quatf(vector: quaternionVector / quaternionLength)
+        anchorRoot.transform = .identity
+        if spatiallyAnchored {
+            var worldTransform = simd_float4x4(rotation)
+            worldTransform.columns.3 = SIMD4(
+                placement.x, placement.y, placement.z, 1
+            )
+            anchorRoot.components.set(
+                AnchoringComponent(.world(transform: worldTransform))
+            )
+            root.position = .zero
+            root.orientation = simd_quatf(angle: 0, axis: [0, 1, 0])
+            isCourseAnchored = false
+        } else {
+            anchorRoot.components.remove(AnchoringComponent.self)
+            root.position = [placement.x, placement.y, placement.z]
+            root.orientation = rotation
+            isCourseAnchored = true
+        }
+        courseScale = placement.scale
+        courseRotation = 0
+        root.scale = SIMD3(repeating: placement.scale)
+        root.isEnabled = true
+        return true
+    }
+
     /// Moves the course center to a point in `anchorRoot` space, including its
     /// height so a tabletop does not collapse back down onto the floor.
     func moveCourse(to point: SIMD3<Float>) {

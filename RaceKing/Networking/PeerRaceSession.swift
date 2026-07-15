@@ -25,6 +25,18 @@ final class PeerRaceSession {
         case connected
     }
 
+    enum CourseSyncState: Equatable {
+        case unavailable
+        case hostPlacement
+        case waitingForHost
+        case preparingMap
+        case waitingForMap
+        case relocalizing
+        case waitingForGuest
+        case synchronized
+        case failed(String)
+    }
+
     struct Room: Identifiable, Hashable {
         let endpoint: NWEndpoint
         let name: String
@@ -33,7 +45,8 @@ final class PeerRaceSession {
     }
 
     private static let serviceType = "_anywheregp._tcp"
-    private static let maximumPacketSize = 256 * 1024
+    private static let maximumPacketSize = 64 * 1024 * 1024
+    private static let maximumWorldMapSize = 40 * 1024 * 1024
     private static let snapshotInterval: TimeInterval = 1.0 / 20.0
 
     private(set) var state: State = .idle
@@ -44,9 +57,24 @@ final class PeerRaceSession {
     private(set) var remoteReady = false
     private(set) var raceComplete = false
     private(set) var errorMessage: String?
+    private(set) var courseSyncState: CourseSyncState = .unavailable
 
     var canStartRace: Bool {
-        state == .connected && role == .host && localReady && remoteReady
+        state == .connected && role == .host
+            && courseSyncState == .synchronized
+            && localReady && remoteReady
+    }
+
+    var isCourseSynchronized: Bool { courseSyncState == .synchronized }
+
+    var canRequestCourseShare: Bool {
+        guard state == .connected, role == .host else { return false }
+        switch courseSyncState {
+        case .hostPlacement, .failed(_):
+            return true
+        default:
+            return false
+        }
     }
 
     var connectionStatusText: String {
@@ -64,6 +92,9 @@ final class PeerRaceSession {
     @ObservationIgnored var onCarState: ((PeerRacePacket.CarState) -> Void)?
     @ObservationIgnored var onFinishResult: ((Int, TimeInterval) -> Void)?
     @ObservationIgnored var onConnectionChanged: ((Bool) -> Void)?
+    @ObservationIgnored var onCourseMapRequested: (() -> Void)?
+    @ObservationIgnored var onCourseMapReceived: ((Data, PeerRacePacket.CoursePlacement) -> Void)?
+    @ObservationIgnored var onCourseSyncInvalidated: (() -> Void)?
 
     @ObservationIgnored private var listener: NWListener?
     @ObservationIgnored private var browser: NWBrowser?
@@ -140,9 +171,53 @@ final class PeerRaceSession {
     }
 
     func setReady(_ ready: Bool) {
-        guard state == .connected else { return }
+        guard state == .connected, isCourseSynchronized else { return }
         localReady = ready
         send(.ready(ready))
+    }
+
+    /// Starts host-side world-map capture. The view owning ARSession supplies the map.
+    func requestCourseShare() {
+        guard canRequestCourseShare else { return }
+        localReady = false
+        remoteReady = false
+        courseSyncState = .preparingMap
+        send(.courseSyncStarted)
+        onCourseMapRequested?()
+    }
+
+    func sendCourseMap(
+        _ data: Data, placement: PeerRacePacket.CoursePlacement
+    ) {
+        guard state == .connected, role == .host,
+              courseSyncState == .preparingMap else { return }
+        guard data.count <= Self.maximumWorldMapSize else {
+            failCourseShare("ARマップが大きすぎます。映す範囲を狭めてやり直してください")
+            return
+        }
+        guard send(.courseMap(data: data, placement: placement)) else {
+            failCourseShare("コース情報を送信できませんでした")
+            return
+        }
+        courseSyncState = .waitingForGuest
+    }
+
+    /// Called by the guest after ARKit has relocalized to the host world map.
+    func confirmCourseMapApplied() {
+        guard state == .connected, role == .guest,
+              courseSyncState == .relocalizing else { return }
+        courseSyncState = .synchronized
+        send(.courseMapApplied)
+    }
+
+    func failCourseShare(_ message: String) {
+        guard state == .connected else { return }
+        let safeMessage = String(message.prefix(160))
+        localReady = false
+        remoteReady = false
+        courseSyncState = .failed(safeMessage)
+        send(.courseMapFailed(safeMessage))
+        onCourseSyncInvalidated?()
     }
 
     func requestStartRace() {
@@ -160,7 +235,7 @@ final class PeerRaceSession {
     }
 
     func sendCarState(_ carState: PeerRacePacket.CarState, deltaTime: TimeInterval) {
-        guard state == .connected else { return }
+        guard state == .connected, isCourseSynchronized else { return }
         snapshotAccumulator += deltaTime
         guard snapshotAccumulator >= Self.snapshotInterval else { return }
         snapshotAccumulator.formTruncatingRemainder(dividingBy: Self.snapshotInterval)
@@ -201,8 +276,12 @@ final class PeerRaceSession {
         peerName = nil
         role = nil
         state = .idle
+        courseSyncState = .unavailable
         resetRoundState()
-        if wasConnected { onConnectionChanged?(false) }
+        if wasConnected {
+            onCourseSyncInvalidated?()
+            onConnectionChanged?(false)
+        }
     }
 
     // MARK: - Connection lifecycle
@@ -282,6 +361,7 @@ final class PeerRaceSession {
             state = .connected
             errorMessage = nil
             resetRoundState()
+            resetCourseSyncState()
             receiveNextChunk(from: connection)
             send(.hello(name: UIDevice.current.name))
             onConnectionChanged?(true)
@@ -304,11 +384,12 @@ final class PeerRaceSession {
 
     // MARK: - Framing and protocol
 
-    private func send(_ packet: PeerRacePacket) {
-        guard state == .connected, let connection else { return }
+    @discardableResult
+    private func send(_ packet: PeerRacePacket) -> Bool {
+        guard state == .connected, let connection else { return false }
         do {
             let payload = try encoder.encode(packet)
-            guard payload.count <= Self.maximumPacketSize else { return }
+            guard payload.count <= Self.maximumPacketSize else { return false }
             var length = UInt32(payload.count).bigEndian
             var frame = Data(bytes: &length, count: MemoryLayout<UInt32>.size)
             frame.append(payload)
@@ -320,8 +401,10 @@ final class PeerRaceSession {
                     self.fail("データを送信できませんでした: \(error.localizedDescription)")
                 }
             })
+            return true
         } catch {
             fail("対戦データを作成できませんでした: \(error.localizedDescription)")
+            return false
         }
     }
 
@@ -374,19 +457,67 @@ final class PeerRaceSession {
     private func handle(_ packet: PeerRacePacket) {
         switch packet.kind {
         case .hello:
-            guard packet.protocolVersion == 1 else {
+            guard packet.protocolVersion == 2 else {
                 fail("アプリのバージョンが対戦相手と一致しません")
                 return
             }
             peerName = packet.name?.isEmpty == false ? packet.name : "対戦相手"
         case .ready:
-            if let isReady = packet.isReady { remoteReady = isReady }
-        case .startRace:
+            if let isReady = packet.isReady,
+               !isReady || isCourseSynchronized {
+                remoteReady = isReady
+            }
+        case .courseSyncStarted:
             guard role == .guest else { return }
+            switch courseSyncState {
+            case .waitingForHost, .failed(_):
+                break
+            default:
+                return
+            }
+            localReady = false
+            remoteReady = false
+            courseSyncState = .waitingForMap
+            send(.ready(false))
+            onCourseSyncInvalidated?()
+        case .courseMap:
+            guard role == .guest,
+                  courseSyncState == .waitingForMap else { return }
+            guard let data = packet.worldMapData,
+                  data.count <= Self.maximumWorldMapSize,
+                  let placement = packet.coursePlacement else {
+                failCourseShare("コース情報を読み取れませんでした")
+                return
+            }
+            localReady = false
+            remoteReady = false
+            courseSyncState = .relocalizing
+            guard let onCourseMapReceived else {
+                failCourseShare("ARコースを読み込めませんでした")
+                return
+            }
+            onCourseMapReceived(data, placement)
+        case .courseMapApplied:
+            guard role == .host,
+                  courseSyncState == .waitingForGuest else { return }
+            courseSyncState = .synchronized
+        case .courseMapFailed:
+            guard !isCourseSynchronized else { return }
+            let message = String(
+                (packet.message ?? "コースの位置合わせに失敗しました").prefix(160)
+            )
+            localReady = false
+            remoteReady = false
+            courseSyncState = .failed(message)
+            onCourseSyncInvalidated?()
+        case .startRace:
+            guard role == .guest, isCourseSynchronized else { return }
             resetFinishState()
             onStartRace?()
         case .carState:
-            if let carState = packet.carState { onCarState?(carState) }
+            if isCourseSynchronized, let carState = packet.carState {
+                onCarState?(carState)
+            }
         case .finish:
             guard role == .host, !remoteFinished,
                   let raceTime = packet.raceTime else { return }
@@ -425,5 +556,16 @@ final class PeerRaceSession {
         localReady = false
         remoteReady = false
         resetFinishState()
+    }
+
+    private func resetCourseSyncState() {
+        switch role {
+        case .host:
+            courseSyncState = .hostPlacement
+        case .guest:
+            courseSyncState = .waitingForHost
+        case nil:
+            courseSyncState = .unavailable
+        }
     }
 }

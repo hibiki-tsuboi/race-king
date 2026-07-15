@@ -15,6 +15,7 @@ struct ContentView: View {
     @State private var haptics = Haptics()
     @State private var tilt = TiltSteering()
     @State private var multiplayer = PeerRaceSession()
+    @State private var peerCourse = PeerCourseCoordinator()
     @State private var arSession = ARSession()
     @State private var spatialTrackingSession = SpatialTrackingSession()
     @State private var cameraAccessDenied = false
@@ -55,6 +56,9 @@ struct ContentView: View {
                         if game.mode == .peerRace {
                             multiplayer.sendCarState(
                                 game.peerCarState(), deltaTime: event.deltaTime
+                            )
+                            peerCourse.updateRelocalization(
+                                deltaTime: event.deltaTime
                             )
                         }
                         audio.setEngine(
@@ -181,6 +185,12 @@ struct ContentView: View {
     private func configureMultiplayer() {
         let game = game
         let multiplayer = multiplayer
+        let peerCourse = peerCourse
+        peerCourse.configure(
+            arSession: arSession,
+            game: game,
+            multiplayer: multiplayer
+        )
         multiplayer.onStartRace = { [weak game] in
             game?.startRace()
         }
@@ -193,8 +203,9 @@ struct ContentView: View {
         multiplayer.onFinishResult = { [weak game] position, raceTime in
             game?.finishPeerRace(position: position, raceTime: raceTime)
         }
-        multiplayer.onConnectionChanged = { [weak game] connected in
+        multiplayer.onConnectionChanged = { [weak game, weak peerCourse] connected in
             game?.setPeerConnected(connected)
+            peerCourse?.connectionChanged(connected)
         }
         game.onPeerRaceLocalFinish = { [weak multiplayer] raceTime in
             multiplayer?.reportLocalFinish(raceTime: raceTime)
@@ -265,11 +276,7 @@ struct ContentView: View {
             sceneUnderstanding: [.shadow, .occlusion],
             camera: .back
         )
-        let arConfiguration = ARWorldTrackingConfiguration()
-        arConfiguration.planeDetection = [.horizontal, .vertical]
-        if ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh) {
-            arConfiguration.sceneReconstruction = .mesh
-        }
+        let arConfiguration = PeerCourseCoordinator.worldTrackingConfiguration()
         let unavailable = await spatialTrackingSession.run(
             spatialConfiguration,
             session: arSession,
@@ -291,7 +298,7 @@ struct ContentView: View {
         MagnifyGesture(minimumScaleDelta: 0.01)
             .onChanged { value in
                 guard game.phase == .ready, game.mode != .roomDrive,
-                      !game.virtualModeActive else {
+                      !game.virtualModeActive, canEditCoursePlacement else {
                     courseScaleAtPinchStart = nil
                     return
                 }
@@ -310,7 +317,7 @@ struct ContentView: View {
         RotateGesture(minimumAngleDelta: .degrees(0.5))
             .onChanged { value in
                 guard game.phase == .ready, game.mode != .roomDrive,
-                      !game.virtualModeActive else {
+                      !game.virtualModeActive, canEditCoursePlacement else {
                     courseRotationAtGestureStart = nil
                     return
                 }
@@ -334,6 +341,7 @@ struct ContentView: View {
     /// with its captured floor so both modes honor the visible tap location.
     private func placeCourse(at screenPoint: CGPoint) {
         guard !game.virtualModeActive,
+              game.mode == .roomDrive || canEditCoursePlacement,
               realityViewSize.width > 0, realityViewSize.height > 0,
               let frame = arSession.currentFrame else { return }
 
@@ -365,6 +373,19 @@ struct ContentView: View {
         }
     }
     #endif
+
+    private var canEditCoursePlacement: Bool {
+        guard game.mode == .peerRace, multiplayer.state == .connected else {
+            return true
+        }
+        guard multiplayer.role == .host else { return false }
+        switch multiplayer.courseSyncState {
+        case .hostPlacement, .failed(_):
+            return true
+        default:
+            return false
+        }
+    }
 
     private func updateTiltSteering() {
         if game.tiltSteeringEnabled {

@@ -131,6 +131,8 @@ struct PeerRaceLobbyView: View {
             .font(.callout.bold())
             .foregroundStyle(.green)
 
+            courseSyncControls
+
             HStack(spacing: 16) {
                 readinessLabel("自分", ready: multiplayer.localReady)
                 readinessLabel("相手", ready: multiplayer.remoteReady)
@@ -147,6 +149,7 @@ struct PeerRaceLobbyView: View {
             }
             .buttonStyle(.borderedProminent)
             .tint(multiplayer.localReady ? .gray : .green)
+            .disabled(!multiplayer.isCourseSynchronized)
 
             if multiplayer.role == .host {
                 Button {
@@ -169,6 +172,88 @@ struct PeerRaceLobbyView: View {
                 multiplayer.disconnect()
             }
             .font(.caption.bold())
+        }
+    }
+
+    @ViewBuilder
+    private var courseSyncControls: some View {
+        switch multiplayer.courseSyncState {
+        case .unavailable:
+            EmptyView()
+        case .hostPlacement:
+            VStack(spacing: 6) {
+                Text("ホストのコースが2台共通になります")
+                    .font(.caption.bold())
+                Text("位置・向き・大きさを決めてから共有してください")
+                    .font(.caption2)
+                    .foregroundStyle(.white.opacity(0.75))
+                Button {
+                    multiplayer.requestCourseShare()
+                } label: {
+                    Label("このコースを共有", systemImage: "arkit")
+                        .font(.callout.bold())
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.cyan)
+                .disabled(!multiplayer.canRequestCourseShare)
+            }
+        case .waitingForHost:
+            courseProgress(
+                "ホストのコース共有を待っています",
+                detail: "この端末でのコース配置は不要です"
+            )
+        case .preparingMap:
+            courseProgress("AR空間を共有しています", detail: "そのままお待ちください")
+        case .waitingForMap:
+            courseProgress("コース情報を受信しています", detail: "そのままお待ちください")
+        case .relocalizing:
+            courseProgress(
+                "コースの位置を合わせています",
+                detail: "ホストと同じ机・床・周囲をゆっくり映してください"
+            )
+        case .waitingForGuest:
+            courseProgress(
+                "相手がコースを位置合わせ中です",
+                detail: "相手のiPhoneで同じ場所を映してください"
+            )
+        case .synchronized:
+            Label("同じ実空間にコースを配置しました", systemImage: "arkit")
+                .font(.caption.bold())
+                .foregroundStyle(.cyan)
+        case .failed(let message):
+            VStack(spacing: 6) {
+                Text(message)
+                    .font(.caption)
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(.red)
+                if multiplayer.role == .host {
+                    Button("コース共有を再試行") {
+                        multiplayer.requestCourseShare()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.cyan)
+                    .disabled(!multiplayer.canRequestCourseShare)
+                } else {
+                    Text("ホスト側から再試行してください")
+                        .font(.caption2.bold())
+                        .foregroundStyle(.yellow)
+                }
+            }
+        }
+    }
+
+    private func courseProgress(_ title: String, detail: String) -> some View {
+        VStack(spacing: 4) {
+            HStack(spacing: 7) {
+                ProgressView()
+                    .tint(.white)
+                Text(title)
+                    .font(.caption.bold())
+            }
+            Text(detail)
+                .font(.caption2)
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.white.opacity(0.75))
         }
     }
 
