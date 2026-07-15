@@ -87,7 +87,7 @@ struct ModeSelectionView: View {
                 id: "timeAttack",
                 mode: .timeAttack,
                 title: "タイムアタック",
-                detail: "3周でベストラップに挑戦",
+                detail: "ベストラップに挑戦",
                 systemImage: "stopwatch.fill",
                 color: .orange
             ),
@@ -95,7 +95,7 @@ struct ModeSelectionView: View {
                 id: "cpuRace",
                 mode: .race,
                 title: "CPU対戦",
-                detail: "4台のライバルと5台で順位を競う",
+                detail: "ライバルたちと順位を競う",
                 systemImage: "person.3.fill",
                 color: .red
             ),
@@ -103,7 +103,7 @@ struct ModeSelectionView: View {
                 id: "peerRace",
                 mode: .peerRace,
                 title: "ネットワーク対戦",
-                detail: "同じWi-FiのiPhone 2〜5台で対戦",
+                detail: "同じWi-FiにつないだiPhone同士で対戦",
                 systemImage: "wifi",
                 color: .blue
             ),
