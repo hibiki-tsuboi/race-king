@@ -56,7 +56,6 @@ struct ContentView: View {
                     multiplayer: multiplayer,
                     canScanRoom: canScanRoom,
                     onScanRoom: startRoomScan,
-                    onSwitchCircuitMode: switchCircuitMode,
                     onResetCoursePlacement: resetCoursePlacement,
                     onChooseMode: returnToModeSelection,
                     onReturnToTitle: returnToTitle
@@ -711,17 +710,6 @@ struct ContentView: View {
         default:
             return false
         }
-    }
-
-    /// Changes only the solo race rules and grid, preserving the live AR world.
-    private func switchCircuitMode(to mode: RaceGame.Mode) {
-        guard screen == .game,
-              game.mode.reusesLocalCoursePlacement,
-              mode.reusesLocalCoursePlacement,
-              mode != game.mode,
-              game.hasReusableCoursePlacement else { return }
-        if game.phase != .ready { game.reset() }
-        game.mode = mode
     }
 
     /// Clears the saved solo placement; the next valid surface tap creates it.

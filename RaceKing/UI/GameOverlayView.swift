@@ -18,7 +18,6 @@ struct GameOverlayView: View {
     @Bindable var multiplayer: PeerRaceSession
     var canScanRoom = false
     var onScanRoom: () -> Void = {}
-    var onSwitchCircuitMode: (RaceGame.Mode) -> Void = { _ in }
     var onResetCoursePlacement: () -> Void = {}
     var onChooseMode: () -> Void = {}
     var onReturnToTitle: () -> Void = {}
@@ -151,19 +150,6 @@ struct GameOverlayView: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(game.mode == .peerRace && !multiplayer.raceComplete)
-                if let target = alternateCircuitMode {
-                    Button {
-                        onSwitchCircuitMode(target)
-                    } label: {
-                        Label(
-                            circuitModeSwitchTitle,
-                            systemImage: "arrow.triangle.swap"
-                        )
-                        .font(.headline.bold())
-                    }
-                    .buttonStyle(.bordered)
-                    .tint(.white)
-                }
             }
             .padding(28)
             .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 22))
@@ -252,30 +238,17 @@ struct GameOverlayView: View {
                     .buttonStyle(.plain)
                 }
 
-                if let target = alternateCircuitMode, game.canStart {
-                    HStack(spacing: 10) {
-                        Button {
-                            onSwitchCircuitMode(target)
-                        } label: {
-                            Label(
-                                circuitModeSwitchTitle,
-                                systemImage: "arrow.triangle.swap"
-                            )
-                        }
-                        .buttonStyle(.bordered)
-                        .tint(.white)
-
-                        if !game.virtualModeActive {
-                            Button(action: onResetCoursePlacement) {
-                                Label(
-                                    "コースを置き直す",
-                                    systemImage: "viewfinder"
-                                )
-                            }
-                            .buttonStyle(.bordered)
-                            .tint(.white)
-                        }
+                if game.mode.reusesLocalCoursePlacement,
+                   game.canStart,
+                   !game.virtualModeActive {
+                    Button(action: onResetCoursePlacement) {
+                        Label(
+                            "コースを置き直す",
+                            systemImage: "viewfinder"
+                        )
                     }
+                    .buttonStyle(.bordered)
+                    .tint(.white)
                     .font(.caption.bold())
                 }
         }
@@ -301,20 +274,6 @@ struct GameOverlayView: View {
         case .peerRace: "wifi"
         case .roomDrive: "viewfinder"
         }
-    }
-
-    private var alternateCircuitMode: RaceGame.Mode? {
-        switch game.mode {
-        case .timeAttack: .race
-        case .race: .timeAttack
-        case .peerRace, .roomDrive: nil
-        }
-    }
-
-    private var circuitModeSwitchTitle: String {
-        game.mode == .timeAttack
-            ? "このコースでCPU対戦"
-            : "このコースでタイムアタック"
     }
 
     private var placementSearchMessage: String {
