@@ -29,7 +29,7 @@ struct ContentView: View {
     @State private var isPreparingRoomScan = false
     @State private var isConfiguringSpatialTracking = false
     @State private var isSpatialTrackingSessionRunning = false
-    @State private var shouldResetARTrackingOnNextRun = false
+    @State private var shouldRecreateModeAnchorsOnNextRun = false
     @State private var spatialTrackingGeneration: UInt = 0
     @State private var spatialTrackingOperation: Task<Void, Never>?
     @State private var roomScanError: String?
@@ -232,7 +232,7 @@ struct ContentView: View {
             multiplayer.disconnect()
         }
         game.mode = mode
-        shouldResetARTrackingOnNextRun = true
+        shouldRecreateModeAnchorsOnNextRun = true
         #if targetEnvironment(simulator)
         game.resetFallbackCoursePlacement()
         #else
@@ -516,18 +516,17 @@ struct ContentView: View {
         // With the custom-session overload, the app owns the ARSession
         // lifecycle. SpatialTrackingSession connects it to RealityKit, but
         // doesn't start camera capture on the app's behalf.
-        let resetsTracking = shouldResetARTrackingOnNextRun
-        let runOptions: ARSession.RunOptions = resetsTracking
-            ? [.resetTracking, .removeExistingAnchors]
-            : []
-        arSession.run(arConfiguration, options: runOptions)
-        if resetsTracking {
+        // Stopping SpatialTrackingSession is enough to rebuild RealityKit's
+        // plane provider at a mode boundary. Resetting the ARSession here can
+        // race camera capture startup and leave VIO permanently uninitialized.
+        arSession.run(arConfiguration)
+        if shouldRecreateModeAnchorsOnNextRun {
             if game.mode == .roomDrive {
                 game.installRoomWorldAnchor()
             } else {
                 game.installCourseSurfaceAnchor()
             }
-            shouldResetARTrackingOnNextRun = false
+            shouldRecreateModeAnchorsOnNextRun = false
         }
         #endif
     }
