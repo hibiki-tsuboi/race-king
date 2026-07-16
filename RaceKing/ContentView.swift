@@ -459,17 +459,16 @@ struct ContentView: View {
         #endif
     }
 
-    /// Stops tracking in the same serial operation chain as startup. The stop
-    /// always completes; a newer start only suppresses the stale final pause.
+    /// Stops tracking in the same serial operation chain as startup. A newer
+    /// start waits for this entire camera and RealityKit shutdown to finish.
     private func requestSpatialTrackingStop() {
         #if !targetEnvironment(simulator)
         isConfiguringSpatialTracking = false
         isPreparingRoomScan = false
-        enqueueSpatialTrackingOperation(skipIfSuperseded: false) { generation in
+        enqueueSpatialTrackingOperation(skipIfSuperseded: false) { _ in
+            arSession.pause()
             await spatialTrackingSession.stop()
             isSpatialTrackingSessionRunning = false
-            guard generation == spatialTrackingGeneration else { return }
-            arSession.pause()
         }
         #endif
     }
