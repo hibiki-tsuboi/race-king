@@ -24,15 +24,18 @@ struct ModeSelectionView: View {
                 VStack(spacing: 18) {
                     HStack {
                         Button(action: onBack) {
-                            Label("タイトル", systemImage: "chevron.left")
-                                .font(.callout.bold())
-                                .foregroundStyle(.white)
-                                .padding(.horizontal, 14)
-                                .padding(.vertical, 9)
-                                .background(.white.opacity(0.12), in: Capsule())
+                            Image("ToTitle")
+                                .resizable()
+                                .scaledToFit()
+                                .frame(width: 150)
+                                .frame(minHeight: 44)
+                                .contentShape(Rectangle())
+                                .accessibilityHidden(true)
                         }
                         .buttonStyle(.plain)
                         .disabled(isPreparing)
+                        .opacity(isPreparing ? 0.45 : 1)
+                        .accessibilityLabel("タイトルに戻る")
 
                         Spacer()
 
