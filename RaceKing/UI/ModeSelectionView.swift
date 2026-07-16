@@ -8,6 +8,7 @@ import SwiftUI
 /// Chooses one game mode before AR tracking and course placement begin.
 struct ModeSelectionView: View {
     var roomDriveAvailable: Bool
+    var peerRaceAvailable = true
     var isPreparing = false
     var onSelect: (RaceGame.Mode) -> Void
     var onBack: () -> Void
@@ -100,8 +101,14 @@ struct ModeSelectionView: View {
                 id: "peerRace",
                 mode: .peerRace,
                 title: "ネットワーク対戦",
-                detail: "同じWi-FiにつないだiPhone同士で対戦",
-                imageName: "MenuNetworkRace"
+                detail: peerRaceAvailable
+                    ? "同じWi-Fi・同じ場所にある2〜5台で対戦"
+                    : "ネットワーク対戦にはARが必要です",
+                imageName: "MenuNetworkRace",
+                isEnabled: peerRaceAvailable,
+                unavailableMessage: peerRaceAvailable
+                    ? nil
+                    : "ARモードが必要です\nアプリを再起動してください"
             ),
             ModeOption(
                 id: "roomDrive",
@@ -122,12 +129,24 @@ struct ModeSelectionView: View {
         Button {
             onSelect(option.mode)
         } label: {
-            Image(option.imageName)
-                .resizable()
-                .scaledToFit()
-                .frame(maxWidth: .infinity)
-                .contentShape(Rectangle())
-                .accessibilityHidden(true)
+            ZStack {
+                Image(option.imageName)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxWidth: .infinity)
+                    .accessibilityHidden(true)
+
+                if let message = option.unavailableMessage {
+                    Text(message)
+                        .font(.caption.bold())
+                        .multilineTextAlignment(.center)
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 7)
+                        .background(.black.opacity(0.78), in: Capsule())
+                }
+            }
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .disabled(!option.isEnabled || isPreparing)
@@ -157,6 +176,7 @@ private struct ModeOption: Identifiable {
     let detail: String
     let imageName: String
     var isEnabled = true
+    var unavailableMessage: String? = nil
 }
 
 #Preview {

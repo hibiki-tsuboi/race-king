@@ -199,6 +199,18 @@ final class PeerRaceSession {
         }
     }
 
+    /// Only the host may manipulate the local course before it is shared.
+    var canEditHostCourse: Bool {
+        guard role == .host,
+              state == .hosting || state == .connected else { return false }
+        switch courseSyncState {
+        case .hostPlacement, .failed(_):
+            return true
+        default:
+            return false
+        }
+    }
+
     var courseSynchronizedGuestCount: Int {
         courseAppliedParticipantIDs.intersection(Set(remoteParticipants.map(\.id))).count
     }
@@ -213,7 +225,7 @@ final class PeerRaceSession {
         }
     }
 
-    @ObservationIgnored var onStartRace: (() -> Void)?
+    @ObservationIgnored var onStartRace: (() -> Bool)?
     @ObservationIgnored var onResetRace: (() -> Void)?
     @ObservationIgnored var onCarState: ((UUID, PeerRacePacket.CarState) -> Void)?
     @ObservationIgnored var onLocalCarChoiceChanged: ((RaceCarChoice) -> Void)?
@@ -614,19 +626,15 @@ final class PeerRaceSession {
 
     func requestStartRace() {
         guard canStartRace else { return }
+        guard onStartRace?() == true else { return }
         raceInProgress = true
         resetFinishState()
         broadcast(.startRace)
-        onStartRace?()
     }
 
     func requestResetRace() {
-        guard state == .connected else { return }
-        if role == .host {
-            performHostReset()
-        } else {
-            _ = sendToHost(.resetRace)
-        }
+        guard state == .connected, role == .host else { return }
+        performHostReset()
     }
 
     func sendCarState(
@@ -1081,7 +1089,9 @@ final class PeerRaceSession {
                   let raceTime = packet.raceTime else { return }
             recordFinish(playerID: senderID, raceTime: raceTime)
         case .resetRace:
-            performHostReset()
+            // Whole-race resets are host-authoritative. Older guests may still
+            // send this packet, so ignore it instead of interrupting everyone.
+            break
         case .hello, .roster, .joinRejected, .courseSyncReset,
              .courseSyncStarted, .courseMap, .courseSyncCompleted,
              .startRace, .finishResult, .raceComplete:
@@ -1249,9 +1259,12 @@ final class PeerRaceSession {
         case .startRace:
             guard isCourseSynchronized, carModelsSynchronized,
                   participants.count >= 2 else { return }
+            guard onStartRace?() == true else {
+                failSession("コース位置を確認できないためレースを開始できませんでした")
+                return
+            }
             raceInProgress = true
             resetFinishState()
-            onStartRace?()
         case .carState:
             guard raceInProgress, isCourseSynchronized,
                   let playerID = packet.playerID,

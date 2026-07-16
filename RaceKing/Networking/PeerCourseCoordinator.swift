@@ -59,7 +59,11 @@ final class PeerCourseCoordinator {
             game.prepareForSharedCourse()
         } else {
             resetSharedGuestSessionIfNeeded()
-            game.cancelSharedCoursePreparation()
+            if multiplayer.role == .host {
+                game.cancelSharedCoursePreparation()
+            } else {
+                game.prepareForSharedCourse()
+            }
         }
     }
 

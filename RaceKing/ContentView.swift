@@ -62,13 +62,18 @@ struct ContentView: View {
                 )
 
                 if cameraAccessDenied && !game.virtualModeActive {
-                    CameraDeniedView { game.activateVirtualMode() }
+                    CameraDeniedView(
+                        allowsPlayWithoutAR: game.mode != .peerRace,
+                        onPlayWithoutAR: { game.activateVirtualMode() },
+                        onChooseMode: returnToModeSelection
+                    )
                 }
             case .modeSelection:
                 ModeSelectionView(
                     roomDriveAvailable: roomPlanSupported
                         && !game.virtualModeActive
                         && !cameraAccessDenied,
+                    peerRaceAvailable: peerRaceAvailable,
                     isPreparing: pendingSpatialTrackingStopCount > 0,
                     onSelect: enterGame,
                     onBack: returnToTitle
@@ -96,6 +101,24 @@ struct ContentView: View {
             if game.mode != .peerRace, multiplayer.state != .idle {
                 multiplayer.disconnect()
             }
+        }
+        .onChange(of: multiplayer.role) {
+            guard screen == .game, game.mode == .peerRace else { return }
+            courseDragOffset = nil
+            courseScaleAtPinchStart = nil
+            courseRotationAtGestureStart = nil
+            if multiplayer.role == .host {
+                game.cancelSharedCoursePreparation()
+            } else {
+                game.prepareForSharedCourse()
+            }
+        }
+        .onChange(of: game.canStart) {
+            guard screen == .game,
+                  game.mode == .peerRace,
+                  multiplayer.localReady,
+                  !game.canStart else { return }
+            multiplayer.setReady(false)
         }
         .onChange(of: game.virtualModeActive) {
             guard game.virtualModeActive else { return }
@@ -229,6 +252,9 @@ struct ContentView: View {
 
     private func enterGame(_ mode: RaceGame.Mode) {
         guard pendingSpatialTrackingStopCount == 0 else { return }
+        #if !targetEnvironment(simulator)
+        guard mode != .peerRace || !game.virtualModeActive else { return }
+        #endif
         if game.phase != .ready {
             game.reset()
         }
@@ -255,6 +281,10 @@ struct ContentView: View {
             game.prepareCourseSurfacePlacement()
         }
         #endif
+        if mode == .peerRace {
+            // The course stays hidden until this device chooses to host.
+            game.prepareForSharedCourse()
+        }
         withAnimation(.easeInOut(duration: 0.35)) {
             screen = .game
         }
@@ -317,7 +347,7 @@ struct ContentView: View {
             multiplayer: multiplayer
         )
         multiplayer.onStartRace = { [weak game] in
-            game?.startRace()
+            game?.startRace() ?? false
         }
         multiplayer.onResetRace = { [weak game] in
             game?.reset()
@@ -380,7 +410,11 @@ struct ContentView: View {
         multiplayer.onFinishResult = { [weak game] position, raceTime in
             game?.finishPeerRace(position: position, raceTime: raceTime)
         }
-        multiplayer.onConnectionChanged = { [weak peerCourse] connected in
+        multiplayer.onConnectionChanged = { [weak game, weak peerCourse] connected in
+            if !connected, let game,
+               game.mode == .peerRace, game.phase != .ready {
+                game.reset()
+            }
             peerCourse?.connectionChanged(connected)
         }
         game.onPeerRaceLocalFinish = { [weak multiplayer] raceTime in
@@ -398,6 +432,14 @@ struct ContentView: View {
         false
         #else
         RoomCaptureSession.isSupported
+        #endif
+    }
+
+    private var peerRaceAvailable: Bool {
+        #if targetEnvironment(simulator)
+        true
+        #else
+        !game.virtualModeActive
         #endif
     }
 
@@ -700,16 +742,8 @@ struct ContentView: View {
     #endif
 
     private var canEditCoursePlacement: Bool {
-        guard game.mode == .peerRace, multiplayer.state == .connected else {
-            return true
-        }
-        guard multiplayer.role == .host else { return false }
-        switch multiplayer.courseSyncState {
-        case .hostPlacement, .failed(_):
-            return true
-        default:
-            return false
-        }
+        guard game.mode == .peerRace else { return true }
+        return multiplayer.canEditHostCourse
     }
 
     /// Clears the saved solo placement; the next valid surface tap creates it.
@@ -734,10 +768,12 @@ struct ContentView: View {
     }
 }
 
-/// Shown when camera access was denied: AR cannot run without it,
-/// but the game still can, with a virtual camera.
+/// Shown when camera access was denied. Solo modes can fall back to a virtual
+/// camera, while network play must return to an AR-capable state.
 private struct CameraDeniedView: View {
+    var allowsPlayWithoutAR = true
     var onPlayWithoutAR: () -> Void
+    var onChooseMode: () -> Void = {}
 
     var body: some View {
         VStack(spacing: 14) {
@@ -745,7 +781,11 @@ private struct CameraDeniedView: View {
                 .font(.largeTitle)
             Text("カメラへのアクセスが必要です")
                 .font(.headline.weight(.black))
-            Text("AR表示と部屋のスキャンにカメラを使用します。\n設定アプリで許可してください。")
+            Text(
+                allowsPlayWithoutAR
+                    ? "AR表示と部屋のスキャンにカメラを使用します。\n設定アプリで許可してください。"
+                    : "ネットワーク対戦にはカメラとARが必要です。\n設定アプリで許可してください。"
+            )
                 .font(.callout)
                 .multilineTextAlignment(.center)
             Button {
@@ -760,16 +800,25 @@ private struct CameraDeniedView: View {
                     .background(.red.gradient, in: Capsule())
             }
             .buttonStyle(.plain)
-            Button {
-                onPlayWithoutAR()
-            } label: {
-                Text("ARなしで遊ぶ")
-                    .font(.headline.bold())
-                    .padding(.horizontal, 24)
-                    .padding(.vertical, 10)
-                    .background(.blue.gradient, in: Capsule())
+            if allowsPlayWithoutAR {
+                Button {
+                    onPlayWithoutAR()
+                } label: {
+                    Text("ARなしで遊ぶ")
+                        .font(.headline.bold())
+                        .padding(.horizontal, 24)
+                        .padding(.vertical, 10)
+                        .background(.blue.gradient, in: Capsule())
+                }
+                .buttonStyle(.plain)
+            } else {
+                Button(action: onChooseMode) {
+                    Label("モード選択に戻る", systemImage: "chevron.left")
+                        .font(.headline.bold())
+                }
+                .buttonStyle(.bordered)
+                .tint(.white)
             }
-            .buttonStyle(.plain)
         }
         .foregroundStyle(.white)
         .padding(26)

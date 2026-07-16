@@ -32,10 +32,14 @@ struct GameOverlayView: View {
                     onChooseMode: { requestExit(to: .modeSelection) },
                     onReturnToTitle: { requestExit(to: .title) },
                     onImportedCarChanged: multiplayer.refreshLocalImportedCar,
-                    peerParticipants: multiplayer.remoteParticipants
+                    peerParticipants: multiplayer.remoteParticipants,
+                    showsRaceMetrics: !isPeerLobby,
+                    canResetRace: canResetRace
                 )
                 Spacer()
-                ControlsView(game: game)
+                if !isPeerLobby {
+                    ControlsView(game: game)
+                }
             }
             .padding()
 
@@ -66,8 +70,9 @@ struct GameOverlayView: View {
     private var centerMessage: some View {
         switch game.phase {
         case .ready:
-            if game.mode != .roomDrive && !game.isCourseAnchored
-                && !(game.mode == .peerRace && multiplayer.state == .connected) {
+            if game.mode != .roomDrive,
+               game.mode != .peerRace,
+               !game.isCourseAnchored {
                 // AR is still scanning: no horizontal course surface yet.
                 VStack(spacing: 14) {
                     ProgressView()
@@ -77,7 +82,7 @@ struct GameOverlayView: View {
                         .font(.callout.bold())
                         .multilineTextAlignment(.center)
                         .foregroundStyle(.white)
-                    if game.canOfferVirtualMode {
+                    if game.mode != .peerRace && game.canOfferVirtualMode {
                         Button {
                             game.activateVirtualMode()
                         } label: {
@@ -136,20 +141,27 @@ struct GameOverlayView: View {
                     .foregroundStyle(.white)
                 finishedDetails
                 if game.mode == .peerRace && !multiplayer.raceComplete {
-                    Text("相手のゴールを待っています…")
+                    Text("ほかの参加者のゴールを待っています…")
                         .font(.callout.bold())
                         .foregroundStyle(.yellow)
                 }
-                Button(action: resetRace) {
-                    Text("もう一度")
-                        .font(.headline.weight(.black))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 28)
-                        .padding(.vertical, 10)
-                        .background(.red.gradient, in: Capsule())
+                if game.mode != .peerRace || multiplayer.role == .host {
+                    Button(action: resetRace) {
+                        Text("もう一度")
+                            .font(.headline.weight(.black))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 28)
+                            .padding(.vertical, 10)
+                            .background(.red.gradient, in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(game.mode == .peerRace && !multiplayer.raceComplete)
+                } else if multiplayer.raceComplete {
+                    Text("ホストが次のレースを準備するのを待っています")
+                        .font(.callout.bold())
+                        .multilineTextAlignment(.center)
+                        .foregroundStyle(.yellow)
                 }
-                .buttonStyle(.plain)
-                .disabled(game.mode == .peerRace && !multiplayer.raceComplete)
             }
             .padding(28)
             .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 22))
@@ -219,7 +231,10 @@ struct GameOverlayView: View {
                 #endif
 
                 if game.mode == .peerRace {
-                    PeerRaceLobbyView(multiplayer: multiplayer)
+                    PeerRaceLobbyView(
+                        multiplayer: multiplayer,
+                        isLocalCourseReady: game.canStart
+                    )
                 } else if game.mode == .roomDrive {
                     roomDriveSetup
                 }
@@ -255,7 +270,7 @@ struct GameOverlayView: View {
         // Anchored below the HUD instead of screen-centered, so it never
         // collides with the HUD on small screens and leaves the grid visible.
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .padding(.top, 170)
+        .padding(.top, game.mode == .peerRace ? 72 : 170)
     }
 
     private var selectedModeTitle: String {
@@ -288,17 +303,8 @@ struct GameOverlayView: View {
                 ? "床に向けてタップでスタート位置を決定"
                 : "まず部屋をスキャンしてください"
         }
-        if game.mode == .peerRace, multiplayer.state == .connected {
-            if multiplayer.role == .guest {
-                return "ホストと同じ机・床を映してコースを位置合わせ"
-            }
-            if !game.isCoursePlaced {
-                return "床やテーブルをタップしてコースを配置"
-            }
-            if multiplayer.isCourseSynchronized {
-                return "共有したコースで最大5台同時にレースします"
-            }
-            return "ホスト側でコースを配置してから共有"
+        if game.mode == .peerRace {
+            return peerPlacementInstruction
         }
         if !game.isCoursePlaced {
             return "床やテーブルをタップしてコースを配置"
@@ -308,9 +314,76 @@ struct GameOverlayView: View {
 
     private func resetRace() {
         if game.mode == .peerRace, multiplayer.state == .connected {
+            guard multiplayer.role == .host else { return }
             multiplayer.requestResetRace()
         } else {
             game.reset()
+        }
+    }
+
+    private var isPeerLobby: Bool {
+        game.mode == .peerRace && game.phase == .ready
+    }
+
+    private var canResetRace: Bool {
+        game.mode != .peerRace || multiplayer.role == .host
+    }
+
+    private var peerPlacementInstruction: String {
+        switch multiplayer.role {
+        case nil:
+            return "まずルームを作るか参加してください"
+        case .host:
+            switch multiplayer.courseSyncState {
+            case .hostPlacement, .failed(_):
+                if !game.isCoursePlaced {
+                    return "床やテーブルをタップしてコースを配置"
+                }
+                if !game.isCourseAnchored {
+                    return "コース位置を確認しています…"
+                }
+                return "ドラッグで移動・二本指でサイズ／向き調整"
+            case .preparingMap:
+                return "AR空間を共有しています…"
+            case .waitingForGuest:
+                return "参加者の位置合わせを待っています"
+            case .synchronized:
+                return game.isCourseAnchored
+                    ? "コース同期完了。全員で準備OKにしてください"
+                    : "コース位置を復元しています。同じ机や床を映してください"
+            default:
+                return "ホストのコースを準備しています"
+            }
+        case .guest:
+            switch multiplayer.state {
+            case .browsing:
+                return "参加するルームを選んでください。コース配置は不要です"
+            case .connecting:
+                return "ホストに接続しています。コース配置は不要です"
+            case .idle:
+                return "ルームに参加するとホストのコースを受信します"
+            case .hosting:
+                return "コース配置はホストが行います"
+            case .connected:
+                switch multiplayer.courseSyncState {
+                case .waitingForHost:
+                    return "ホストがコースを準備しています。配置操作は不要です"
+                case .waitingForMap:
+                    return "ホストのコース情報を受信しています…"
+                case .relocalizing:
+                    return "ホストと同じ机・床・周囲をゆっくり映してください"
+                case .waitingForGuest:
+                    return "位置合わせが完了しました。ほかの参加者を待っています"
+                case .synchronized:
+                    return game.isCourseAnchored
+                        ? "コース同期完了。準備OKにしてください"
+                        : "コース位置を復元しています。同じ机や床を映してください"
+                case .failed(_):
+                    return "ホストがコースを再共有するまでお待ちください"
+                default:
+                    return "ホストのコースを準備しています"
+                }
+            }
         }
     }
 
@@ -422,6 +495,8 @@ struct HUDView: View {
     var onReturnToTitle: () -> Void = {}
     var onImportedCarChanged: () -> Void = {}
     var peerParticipants: [PeerRaceParticipant] = []
+    var showsRaceMetrics = true
+    var canResetRace = true
     @State private var showingCarImporter = false
     @State private var importSlot: CarImportSlot = .player
     @State private var importErrorMessage: String?
@@ -452,37 +527,39 @@ struct HUDView: View {
 
     private var hudContent: some View {
         HStack(alignment: .top) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(lapLabel)
-                    .font(.headline.weight(.black))
-                Text(lapTimeString(game.currentLapTime))
-                    .font(.system(size: 34, weight: .bold, design: .rounded))
-                    .monospacedDigit()
-                if game.mode == .peerRace {
-                    ForEach(peerParticipants) { participant in
-                        let peerLap = min(
-                            game.peerLapCount(for: participant.id) + 1,
-                            RaceGame.raceLapTotal
-                        )
-                        Text(
-                            "#\(participant.slot + 1) \(participant.name)  LAP \(peerLap)/\(RaceGame.raceLapTotal)"
-                        )
-                        .lineLimit(1)
-                        .font(.caption2.bold())
-                        .foregroundStyle(.cyan)
+            if showsRaceMetrics {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(lapLabel)
+                        .font(.headline.weight(.black))
+                    Text(lapTimeString(game.currentLapTime))
+                        .font(.system(size: 34, weight: .bold, design: .rounded))
+                        .monospacedDigit()
+                    if game.mode == .peerRace {
+                        ForEach(peerParticipants) { participant in
+                            let peerLap = min(
+                                game.peerLapCount(for: participant.id) + 1,
+                                RaceGame.raceLapTotal
+                            )
+                            Text(
+                                "#\(participant.slot + 1) \(participant.name)  LAP \(peerLap)/\(RaceGame.raceLapTotal)"
+                            )
+                            .lineLimit(1)
+                            .font(.caption2.bold())
+                            .foregroundStyle(.cyan)
+                        }
                     }
-                }
-                if game.mode == .timeAttack {
-                    if let last = game.lastLapTime {
-                        Text("LAST  \(lapTimeString(last))")
-                            .font(.caption.bold())
-                            .monospacedDigit()
-                    }
-                    if let best = game.bestLapTime {
-                        Text("BEST  \(lapTimeString(best))")
-                            .font(.caption.bold())
-                            .monospacedDigit()
-                            .foregroundStyle(.purple)
+                    if game.mode == .timeAttack {
+                        if let last = game.lastLapTime {
+                            Text("LAST  \(lapTimeString(last))")
+                                .font(.caption.bold())
+                                .monospacedDigit()
+                        }
+                        if let best = game.bestLapTime {
+                            Text("BEST  \(lapTimeString(best))")
+                                .font(.caption.bold())
+                                .monospacedDigit()
+                                .foregroundStyle(.purple)
+                        }
                     }
                 }
             }
@@ -514,7 +591,7 @@ struct HUDView: View {
                     .buttonStyle(.plain)
                     .accessibilityLabel("戻る")
 
-                    if game.phase != .ready {
+                    if game.phase != .ready && canResetRace {
                         Button(action: onReset) {
                             Image(systemName: "arrow.counterclockwise")
                                 .font(.title3.bold())
@@ -571,9 +648,11 @@ struct HUDView: View {
                     .buttonStyle(.plain)
                     .disabled(isImportingCar)
                 }
-                Text("\(game.displaySpeed) km/h")
-                    .font(.title3.weight(.heavy))
-                    .monospacedDigit()
+                if showsRaceMetrics {
+                    Text("\(game.displaySpeed) km/h")
+                        .font(.title3.weight(.heavy))
+                        .monospacedDigit()
+                }
             }
         }
         .foregroundStyle(.white)

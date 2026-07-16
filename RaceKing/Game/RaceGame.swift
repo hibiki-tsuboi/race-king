@@ -246,13 +246,16 @@ final class RaceGame {
     private var floorSearchTime: TimeInterval = 0
     /// Makes `isCourseAnchored` follow `anchorRoot` during AR placement.
     private var requiresCourseAnchor = false
+    /// Keeps an old local course hidden until this peer becomes host or
+    /// successfully applies the host's shared placement.
+    private var peerCoursePresentationSuppressed = false
     /// Camera entity for the non-AR mode (configured on activation).
     let virtualCamera = Entity()
 
     /// Switches to a fixed virtual camera over a grass floor — the same
     /// presentation the simulator uses. One-way until the next launch.
     func activateVirtualMode() {
-        guard !virtualModeActive else { return }
+        guard !virtualModeActive, mode != .peerRace else { return }
         if mode == .roomDrive { mode = .timeAttack }
         virtualModeActive = true
         resetFallbackCoursePlacement()
@@ -372,6 +375,7 @@ final class RaceGame {
         isCoursePlaced = true
         hasReusableCoursePlacement = mode.reusesLocalCoursePlacement
         requiresCourseAnchor = false
+        peerCoursePresentationSuppressed = false
         floorSearchTime = 0
         canOfferVirtualMode = false
     }
@@ -390,6 +394,9 @@ final class RaceGame {
         isCoursePlaced = false
         hasReusableCoursePlacement = false
         requiresCourseAnchor = true
+        if mode != .peerRace {
+            peerCoursePresentationSuppressed = false
+        }
         floorSearchTime = 0
         canOfferVirtualMode = false
     }
@@ -468,11 +475,13 @@ final class RaceGame {
 
     /// Hides the guest's independent course until ARKit shares the host world.
     func prepareForSharedCourse() {
-        guard phase == .ready, mode == .peerRace else { return }
+        guard mode == .peerRace else { return }
+        peerCoursePresentationSuppressed = true
         root.isEnabled = false
     }
 
     func cancelSharedCoursePreparation() {
+        peerCoursePresentationSuppressed = false
         root.isEnabled = isCoursePlaced
     }
 
@@ -533,6 +542,7 @@ final class RaceGame {
         root.scale = SIMD3(repeating: placement.scale)
         isCoursePlaced = true
         hasReusableCoursePlacement = false
+        peerCoursePresentationSuppressed = false
         root.isEnabled = true
         return true
     }
@@ -822,9 +832,10 @@ final class RaceGame {
         onEvent?(.raceFinished(position: position))
     }
 
-    func startRace() {
+    @discardableResult
+    func startRace() -> Bool {
         guard phase == .ready, canStart,
-              mode != .peerRace || peerConnected else { return }
+              mode != .peerRace || peerConnected else { return false }
         if mode == .timeAttack {
             sessionBestLapTime = nil
             sessionBestLapDelta = nil
@@ -835,6 +846,7 @@ final class RaceGame {
         countdownValue = 3
         phase = .countdown
         onEvent?(.countdownTick(3))
+        return true
     }
 
     func reset() {
@@ -866,7 +878,8 @@ final class RaceGame {
         if anchored != isCourseAnchored { isCourseAnchored = anchored }
 
         // Offer the non-AR mode when floor detection keeps struggling.
-        if mode != .roomDrive, phase == .ready, !anchored, !virtualModeActive {
+        if mode != .roomDrive, mode != .peerRace,
+           phase == .ready, !anchored, !virtualModeActive {
             floorSearchTime += deltaTime
             if floorSearchTime >= 8, !canOfferVirtualMode {
                 canOfferVirtualMode = true
@@ -1325,6 +1338,7 @@ final class RaceGame {
             placePlayer(back: slot.back, lateral: slot.lateral)
         case .peerRace:
             root.isEnabled = isCoursePlaced
+                && !peerCoursePresentationSuppressed
             roomRoot.isEnabled = false
             movePlayer(to: root)
             car.isEnabled = true

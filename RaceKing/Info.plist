@@ -31,7 +31,7 @@
 	<key>NSCameraUsageDescription</key>
 	<string>ARでレースコースを表示し、部屋をスキャンするためにカメラを使用します。</string>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>近くのiPhoneと2人対戦するためにローカルネットワークを使用します。</string>
+	<string>近くのiPhoneと2〜5人でネットワーク対戦するためにローカルネットワークを使用します。</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

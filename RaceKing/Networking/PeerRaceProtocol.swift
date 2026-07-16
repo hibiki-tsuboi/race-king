@@ -82,7 +82,7 @@ struct PeerRacePacket: Codable, Sendable {
     var raceTime: TimeInterval?
     var position: Int?
 
-    static let currentVersion = 6
+    static let currentVersion = 7
 
     static func hello(
         playerID: UUID, name: String, carChoice: RaceCarChoice
