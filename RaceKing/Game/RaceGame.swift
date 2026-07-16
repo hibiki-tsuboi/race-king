@@ -113,6 +113,11 @@ final class RaceGame {
         case race
         case peerRace
         case roomDrive
+
+        /// Solo circuit modes share one placement in the current AR world.
+        var reusesLocalCoursePlacement: Bool {
+            self == .timeAttack || self == .race
+        }
     }
 
     /// Laps available for setting the fastest time in time attack mode.
@@ -132,13 +137,14 @@ final class RaceGame {
     // MARK: - State observed by the HUD
 
     private(set) var phase: Phase = .ready
-    /// False while AR is still searching for a horizontal course surface;
-    /// always true on platforms without a surface anchor (simulator, macOS).
+    /// False while RealityKit is resolving the course's world anchor;
+    /// always true in simulator and virtual-camera play.
     private(set) var isCourseAnchored = true
     /// True only after the player has chosen a course position on the surface.
-    /// Kept separate from `isCourseAnchored` because a cached AR plane can
-    /// resolve immediately when switching modes.
+    /// Kept separate from `isCourseAnchored` while a saved pose reconnects.
     private(set) var isCoursePlaced = true
+    /// True when the current solo placement can survive a race-rule swap.
+    private(set) var hasReusableCoursePlacement = false
     var mode: Mode = .timeAttack {
         didSet {
             guard phase == .ready, mode != oldValue else { return }
@@ -179,7 +185,9 @@ final class RaceGame {
     private(set) var peerLapCounts: [UUID: Int] = [:]
 
     var canStart: Bool {
-        mode == .roomDrive ? roomStartPlaced : isCoursePlaced
+        mode == .roomDrive
+            ? roomStartPlaced
+            : isCoursePlaced && isCourseAnchored
     }
 
     // MARK: - Settings (persisted)
@@ -236,9 +244,8 @@ final class RaceGame {
     /// Turns true once floor detection has struggled for a while.
     private(set) var canOfferVirtualMode = false
     private var floorSearchTime: TimeInterval = 0
-    /// Keeps the loading state active while AR is restarting before the plane
-    /// anchoring component is installed.
-    private var requiresCourseSurfaceAnchor = false
+    /// Makes `isCourseAnchored` follow `anchorRoot` during AR placement.
+    private var requiresCourseAnchor = false
     /// Camera entity for the non-AR mode (configured on activation).
     let virtualCamera = Entity()
 
@@ -350,12 +357,6 @@ final class RaceGame {
         placeCarsOnGrid()
     }
 
-    /// Initial AR target. A modest unclassified horizontal plane lets the
-    /// circuit start on either a floor or a tabletop.
-    static var courseSurfaceAnchorTarget: AnchoringComponent.Target {
-        .plane(.horizontal, classification: .any, minimumBounds: [0.3, 0.3])
-    }
-
     /// Restores the fixed-camera course to its default pose. Simulator and
     /// virtual play have no AR placement gesture, so they start ready to race.
     func resetFallbackCoursePlacement() {
@@ -369,7 +370,8 @@ final class RaceGame {
         courseScale = 1
         isCourseAnchored = true
         isCoursePlaced = true
-        requiresCourseSurfaceAnchor = false
+        hasReusableCoursePlacement = mode.reusesLocalCoursePlacement
+        requiresCourseAnchor = false
         floorSearchTime = 0
         canOfferVirtualMode = false
     }
@@ -386,15 +388,27 @@ final class RaceGame {
         courseScale = 1
         isCourseAnchored = false
         isCoursePlaced = false
-        requiresCourseSurfaceAnchor = true
+        hasReusableCoursePlacement = false
+        requiresCourseAnchor = true
         floorSearchTime = 0
         canOfferVirtualMode = false
     }
 
-    /// Anchors the prepared circuit to the first usable surface found by AR.
-    func installCourseSurfaceAnchor() {
-        prepareCourseSurfacePlacement()
-        anchorRoot.components.set(AnchoringComponent(Self.courseSurfaceAnchorTarget))
+    /// Keeps the placed world anchor while RealityKit reconnects after a menu.
+    @discardableResult
+    func resumeReusableCoursePlacement() -> Bool {
+        guard mode.reusesLocalCoursePlacement,
+              hasReusableCoursePlacement,
+              isCoursePlaced,
+              anchorRoot.components.has(AnchoringComponent.self) else {
+            return false
+        }
+        root.isEnabled = true
+        isCourseAnchored = false
+        requiresCourseAnchor = true
+        floorSearchTime = 0
+        canOfferVirtualMode = false
+        return true
     }
 
     /// Recreates the world-origin anchor after an ARSession tracking reset.
@@ -410,7 +424,8 @@ final class RaceGame {
     func removeCourseSurfaceAnchor() {
         anchorRoot.components.remove(AnchoringComponent.self)
         isCourseAnchored = true
-        requiresCourseSurfaceAnchor = false
+        hasReusableCoursePlacement = false
+        requiresCourseAnchor = false
     }
 
     /// Captures the course root in AR world coordinates for a nearby guest.
@@ -468,7 +483,7 @@ final class RaceGame {
             root.isEnabled = true
             return
         }
-        installCourseSurfaceAnchor()
+        prepareCourseSurfacePlacement()
     }
 
     /// Places the course at the host's pose after both sessions share a world origin.
@@ -505,20 +520,46 @@ final class RaceGame {
             root.position = .zero
             root.orientation = simd_quatf(angle: 0, axis: [0, 1, 0])
             isCourseAnchored = false
-            requiresCourseSurfaceAnchor = true
+            requiresCourseAnchor = true
         } else {
             anchorRoot.components.remove(AnchoringComponent.self)
             root.position = [placement.x, placement.y, placement.z]
             root.orientation = rotation
             isCourseAnchored = true
-            requiresCourseSurfaceAnchor = false
+            requiresCourseAnchor = false
         }
         courseScale = placement.scale
         courseRotation = 0
         root.scale = SIMD3(repeating: placement.scale)
         isCoursePlaced = true
+        hasReusableCoursePlacement = false
         root.isEnabled = true
         return true
+    }
+
+    /// Places the circuit at a raycast pose without waiting for a separate
+    /// RealityKit plane anchor to resolve first.
+    func placeCourse(atWorldTransform worldTransform: simd_float4x4) {
+        guard phase == .ready, mode != .roomDrive else { return }
+        let translation = worldTransform.columns.3
+        guard translation.x.isFinite, translation.y.isFinite,
+              translation.z.isFinite else { return }
+
+        anchorRoot.components.remove(AnchoringComponent.self)
+        anchorRoot.transform = .identity
+        anchorRoot.components.set(
+            AnchoringComponent(.world(transform: worldTransform))
+        )
+        root.position = .zero
+        root.orientation = simd_quatf(angle: courseRotation, axis: [0, 1, 0])
+        root.scale = SIMD3(repeating: courseScale)
+        root.isEnabled = true
+        isCourseAnchored = false
+        isCoursePlaced = true
+        hasReusableCoursePlacement = mode.reusesLocalCoursePlacement
+        requiresCourseAnchor = true
+        floorSearchTime = 0
+        canOfferVirtualMode = false
     }
 
     /// Moves the course center to a point in `anchorRoot` space, including its
@@ -531,9 +572,15 @@ final class RaceGame {
     /// Converts a raycast result from the shared AR world into the current
     /// anchor's local coordinates before moving the circuit.
     func moveCourse(toWorldPoint point: SIMD3<Float>) {
-        guard phase == .ready, mode != .roomDrive, isCourseAnchored else { return }
+        guard phase == .ready, mode != .roomDrive else { return }
+        if !isCoursePlaced {
+            var worldTransform = matrix_identity_float4x4
+            worldTransform.columns.3 = SIMD4(point.x, point.y, point.z, 1)
+            placeCourse(atWorldTransform: worldTransform)
+            return
+        }
+        guard isCourseAnchored else { return }
         moveCourse(to: anchorRoot.convert(position: point, from: nil))
-        isCoursePlaced = true
         root.isEnabled = true
     }
 
@@ -814,7 +861,7 @@ final class RaceGame {
     /// Advances the game by one frame. Called from the scene's update event.
     func update(deltaTime: TimeInterval) {
         let anchored = mode == .roomDrive
-            || !requiresCourseSurfaceAnchor
+            || !requiresCourseAnchor
             || anchorRoot.isAnchored
         if anchored != isCourseAnchored { isCourseAnchored = anchored }
 

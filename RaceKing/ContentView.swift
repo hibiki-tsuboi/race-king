@@ -29,7 +29,8 @@ struct ContentView: View {
     @State private var isPreparingRoomScan = false
     @State private var isConfiguringSpatialTracking = false
     @State private var isSpatialTrackingSessionRunning = false
-    @State private var shouldRecreateModeAnchorsOnNextRun = false
+    @State private var shouldInstallRoomWorldAnchorOnNextRun = false
+    @State private var pendingSpatialTrackingStopCount = 0
     @State private var spatialTrackingGeneration: UInt = 0
     @State private var spatialTrackingOperation: Task<Void, Never>?
     @State private var roomScanError: String?
@@ -55,6 +56,8 @@ struct ContentView: View {
                     multiplayer: multiplayer,
                     canScanRoom: canScanRoom,
                     onScanRoom: startRoomScan,
+                    onSwitchCircuitMode: switchCircuitMode,
+                    onResetCoursePlacement: resetCoursePlacement,
                     onChooseMode: returnToModeSelection,
                     onReturnToTitle: returnToTitle
                 )
@@ -67,6 +70,7 @@ struct ContentView: View {
                     roomDriveAvailable: roomPlanSupported
                         && !game.virtualModeActive
                         && !cameraAccessDenied,
+                    isPreparing: pendingSpatialTrackingStopCount > 0,
                     onSelect: enterGame,
                     onBack: returnToTitle
                 )
@@ -225,21 +229,29 @@ struct ContentView: View {
     }
 
     private func enterGame(_ mode: RaceGame.Mode) {
+        guard pendingSpatialTrackingStopCount == 0 else { return }
         if game.phase != .ready {
             game.reset()
         }
         if multiplayer.state != .idle {
             multiplayer.disconnect()
         }
+        let reusesCoursePlacement = game.mode.reusesLocalCoursePlacement
+            && mode.reusesLocalCoursePlacement
+            && game.hasReusableCoursePlacement
         game.mode = mode
-        shouldRecreateModeAnchorsOnNextRun = true
+        shouldInstallRoomWorldAnchorOnNextRun = mode == .roomDrive
         #if targetEnvironment(simulator)
         game.resetFallbackCoursePlacement()
         #else
         if game.virtualModeActive {
             game.resetFallbackCoursePlacement()
         } else if mode == .roomDrive {
+            game.prepareCourseSurfacePlacement()
             game.removeCourseSurfaceAnchor()
+        } else if reusesCoursePlacement,
+                  game.resumeReusableCoursePlacement() {
+            // The world anchor and course transform survive the solo-mode swap.
         } else {
             game.prepareCourseSurfacePlacement()
         }
@@ -258,6 +270,9 @@ struct ContentView: View {
 
     private func returnToTitle() {
         guard screen == .game else {
+            if screen == .modeSelection {
+                game.prepareCourseSurfacePlacement()
+            }
             withAnimation(.easeInOut(duration: 0.3)) {
                 screen = .title
             }
@@ -279,11 +294,14 @@ struct ContentView: View {
         audio.setEngine(speedRatio: 0, running: false)
         isPreparingRoomScan = false
         game.clearRoomDriveSetup()
+        if destination == .title {
+            game.prepareCourseSurfacePlacement()
+        }
         courseDragOffset = nil
         courseScaleAtPinchStart = nil
         courseRotationAtGestureStart = nil
-        // A menu is a clean session boundary. RoomPlan's world is only kept
-        // while its full-screen capture returns to the same free-drive mode.
+        // Camera tracking stops in menus, while a solo world anchor remains
+        // available for the next time-attack or CPU-race entry.
         requestSpatialTrackingStop()
         withAnimation(.easeInOut(duration: 0.3)) {
             screen = destination
@@ -465,7 +483,13 @@ struct ContentView: View {
         #if !targetEnvironment(simulator)
         isConfiguringSpatialTracking = false
         isPreparingRoomScan = false
+        pendingSpatialTrackingStopCount += 1
         enqueueSpatialTrackingOperation(skipIfSuperseded: false) { _ in
+            defer {
+                pendingSpatialTrackingStopCount = max(
+                    0, pendingSpatialTrackingStopCount - 1
+                )
+            }
             arSession.pause()
             await spatialTrackingSession.stop()
             isSpatialTrackingSessionRunning = false
@@ -519,13 +543,9 @@ struct ContentView: View {
         // plane provider at a mode boundary. Resetting the ARSession here can
         // race camera capture startup and leave VIO permanently uninitialized.
         arSession.run(arConfiguration)
-        if shouldRecreateModeAnchorsOnNextRun {
-            if game.mode == .roomDrive {
-                game.installRoomWorldAnchor()
-            } else {
-                game.installCourseSurfaceAnchor()
-            }
-            shouldRecreateModeAnchorsOnNextRun = false
+        if shouldInstallRoomWorldAnchorOnNextRun {
+            if game.mode == .roomDrive { game.installRoomWorldAnchor() }
+            shouldInstallRoomWorldAnchorOnNextRun = false
         }
         #endif
     }
@@ -599,7 +619,8 @@ struct ContentView: View {
     /// on it does not snap its center underneath the touch.
     private func dragCourse(from startPoint: CGPoint, to currentPoint: CGPoint) {
         guard game.phase == .ready, game.mode != .roomDrive,
-              game.isCourseAnchored, !game.virtualModeActive,
+              (!game.isCoursePlaced || game.isCourseAnchored),
+              !game.virtualModeActive,
               canEditCoursePlacement,
               courseScaleAtPinchStart == nil,
               courseRotationAtGestureStart == nil else {
@@ -645,10 +666,7 @@ struct ContentView: View {
                 alongRayFrom: query.origin, direction: query.direction
             )
         } else if let result = arSession.raycast(query).first {
-            let translation = result.worldTransform.columns.3
-            game.moveCourse(toWorldPoint: [
-                translation.x, translation.y, translation.z,
-            ])
+            game.placeCourse(atWorldTransform: result.worldTransform)
         }
     }
 
@@ -693,6 +711,29 @@ struct ContentView: View {
         default:
             return false
         }
+    }
+
+    /// Changes only the solo race rules and grid, preserving the live AR world.
+    private func switchCircuitMode(to mode: RaceGame.Mode) {
+        guard screen == .game,
+              game.mode.reusesLocalCoursePlacement,
+              mode.reusesLocalCoursePlacement,
+              mode != game.mode,
+              game.hasReusableCoursePlacement else { return }
+        if game.phase != .ready { game.reset() }
+        game.mode = mode
+    }
+
+    /// Clears the saved solo placement; the next valid surface tap creates it.
+    private func resetCoursePlacement() {
+        guard screen == .game,
+              game.phase == .ready,
+              game.mode.reusesLocalCoursePlacement,
+              !game.virtualModeActive else { return }
+        courseDragOffset = nil
+        courseScaleAtPinchStart = nil
+        courseRotationAtGestureStart = nil
+        game.prepareCourseSurfacePlacement()
     }
 
     private func updateTiltSteering() {
