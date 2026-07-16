@@ -233,7 +233,9 @@ struct GameOverlayView: View {
                 if game.mode == .peerRace {
                     PeerRaceLobbyView(
                         multiplayer: multiplayer,
-                        isLocalCourseReady: game.canStart
+                        isLocalCourseReady: game.canStart,
+                        canResetCoursePlacement: canResetPeerCoursePlacement,
+                        onResetCoursePlacement: onResetCoursePlacement
                     )
                 } else if game.mode == .roomDrive {
                     roomDriveSetup
@@ -323,6 +325,14 @@ struct GameOverlayView: View {
 
     private var isPeerLobby: Bool {
         game.mode == .peerRace && game.phase == .ready
+    }
+
+    private var canResetPeerCoursePlacement: Bool {
+        #if targetEnvironment(simulator)
+        false
+        #else
+        game.isCoursePlaced && !game.virtualModeActive
+        #endif
     }
 
     private var canResetRace: Bool {

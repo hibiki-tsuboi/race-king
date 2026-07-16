@@ -746,11 +746,14 @@ struct ContentView: View {
         return multiplayer.canEditHostCourse
     }
 
-    /// Clears the saved solo placement; the next valid surface tap creates it.
+    /// Clears an editable course placement; the next valid surface tap creates it.
     private func resetCoursePlacement() {
+        let canResetPeerPlacement = game.mode == .peerRace
+            && multiplayer.canEditHostCourse
+            && game.isCoursePlaced
         guard screen == .game,
               game.phase == .ready,
-              game.mode.reusesLocalCoursePlacement,
+              game.mode.reusesLocalCoursePlacement || canResetPeerPlacement,
               !game.virtualModeActive else { return }
         courseDragOffset = nil
         courseScaleAtPinchStart = nil

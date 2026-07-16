@@ -9,6 +9,8 @@ import SwiftUI
 struct PeerRaceLobbyView: View {
     @Bindable var multiplayer: PeerRaceSession
     var isLocalCourseReady: Bool
+    var canResetCoursePlacement: Bool
+    var onResetCoursePlacement: () -> Void = {}
 
     var body: some View {
         ViewThatFits(in: .vertical) {
@@ -40,6 +42,9 @@ struct PeerRaceLobbyView: View {
                     "参加者を待っています…（\(multiplayer.participants.count)/\(PeerRaceSession.maximumPlayers)人）",
                     detail: "参加者を待ちながら、ホスト側でコースを配置できます"
                 )
+                if canResetHostCourse {
+                    resetHostCourseButton
+                }
             case .browsing:
                 roomBrowser
                 sectionDivider
@@ -406,6 +411,9 @@ struct PeerRaceLobbyView: View {
                 .disabled(
                     !multiplayer.canRequestCourseShare || !isLocalCourseReady
                 )
+                if canResetHostCourse {
+                    resetHostCourseButton
+                }
                 if !isLocalCourseReady {
                     Text("床かテーブルにコースを配置し、位置が確定するまでお待ちください")
                         .font(.caption2.bold())
@@ -465,6 +473,9 @@ struct PeerRaceLobbyView: View {
                     .disabled(
                         !multiplayer.canRequestCourseShare || !isLocalCourseReady
                     )
+                    if canResetHostCourse {
+                        resetHostCourseButton
+                    }
                 } else {
                     Text("ホスト側から再試行してください")
                         .font(.caption2.bold())
@@ -472,6 +483,19 @@ struct PeerRaceLobbyView: View {
                 }
             }
         }
+    }
+
+    private var canResetHostCourse: Bool {
+        multiplayer.canEditHostCourse && canResetCoursePlacement
+    }
+
+    private var resetHostCourseButton: some View {
+        Button(action: onResetCoursePlacement) {
+            Label("コースを置き直す", systemImage: "viewfinder")
+                .font(.caption.bold())
+        }
+        .buttonStyle(.bordered)
+        .tint(.white)
     }
 
     private func courseProgress(_ title: String, detail: String) -> some View {
