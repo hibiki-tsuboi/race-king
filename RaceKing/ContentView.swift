@@ -29,6 +29,7 @@ struct ContentView: View {
     @State private var isPreparingRoomScan = false
     @State private var isConfiguringSpatialTracking = false
     @State private var isSpatialTrackingSessionRunning = false
+    @State private var shouldResetARTrackingOnNextRun = false
     @State private var spatialTrackingGeneration: UInt = 0
     @State private var spatialTrackingOperation: Task<Void, Never>?
     @State private var roomScanError: String?
@@ -231,6 +232,7 @@ struct ContentView: View {
             multiplayer.disconnect()
         }
         game.mode = mode
+        shouldResetARTrackingOnNextRun = true
         #if targetEnvironment(simulator)
         game.resetFallbackCoursePlacement()
         #else
@@ -239,7 +241,7 @@ struct ContentView: View {
         } else if mode == .roomDrive {
             game.removeCourseSurfaceAnchor()
         } else {
-            game.installCourseSurfaceAnchor()
+            game.prepareCourseSurfacePlacement()
         }
         #endif
         withAnimation(.easeInOut(duration: 0.35)) {
@@ -264,7 +266,7 @@ struct ContentView: View {
         leaveGame(for: .title)
     }
 
-    /// Stops gameplay input and audio, then pauses the camera before leaving.
+    /// Stops gameplay and AR services before returning to a menu.
     private func leaveGame(for destination: AppScreen) {
         multiplayer.disconnect()
         tilt.stop()
@@ -276,12 +278,13 @@ struct ContentView: View {
         }
         audio.setEngine(speedRatio: 0, running: false)
         isPreparingRoomScan = false
+        game.clearRoomDriveSetup()
         courseDragOffset = nil
         courseScaleAtPinchStart = nil
         courseRotationAtGestureStart = nil
-        // The RealityView and SpatialTrackingSession persist across the app's
-        // own screens. Keep their connection ready and only pause camera work.
-        arSession.pause()
+        // A menu is a clean session boundary. RoomPlan's world is only kept
+        // while its full-screen capture returns to the same free-drive mode.
+        requestSpatialTrackingStop()
         withAnimation(.easeInOut(duration: 0.3)) {
             screen = destination
         }
@@ -445,8 +448,10 @@ struct ContentView: View {
               !showingRoomScan,
               !isPreparingRoomScan,
               !game.virtualModeActive,
-              !cameraAccessDenied,
-              !isConfiguringSpatialTracking else { return }
+              !cameraAccessDenied else { return }
+        // A mode entry can arrive while RoomPlan's tracking handoff is still
+        // configuring. Enqueue it anyway: the generation token suppresses the
+        // stale operation and guarantees the latest mode resumes ARSession.
         isConfiguringSpatialTracking = true
         enqueueSpatialTrackingOperation { generation in
             await runSpatialTracking(generation: generation)
@@ -511,7 +516,19 @@ struct ContentView: View {
         // With the custom-session overload, the app owns the ARSession
         // lifecycle. SpatialTrackingSession connects it to RealityKit, but
         // doesn't start camera capture on the app's behalf.
-        arSession.run(arConfiguration)
+        let resetsTracking = shouldResetARTrackingOnNextRun
+        let runOptions: ARSession.RunOptions = resetsTracking
+            ? [.resetTracking, .removeExistingAnchors]
+            : []
+        arSession.run(arConfiguration, options: runOptions)
+        if resetsTracking {
+            if game.mode == .roomDrive {
+                game.installRoomWorldAnchor()
+            } else {
+                game.installCourseSurfaceAnchor()
+            }
+            shouldResetARTrackingOnNextRun = false
+        }
         #endif
     }
 

@@ -236,6 +236,9 @@ final class RaceGame {
     /// Turns true once floor detection has struggled for a while.
     private(set) var canOfferVirtualMode = false
     private var floorSearchTime: TimeInterval = 0
+    /// Keeps the loading state active while AR is restarting before the plane
+    /// anchoring component is installed.
+    private var requiresCourseSurfaceAnchor = false
     /// Camera entity for the non-AR mode (configured on activation).
     let virtualCamera = Entity()
 
@@ -366,13 +369,13 @@ final class RaceGame {
         courseScale = 1
         isCourseAnchored = true
         isCoursePlaced = true
+        requiresCourseSurfaceAnchor = false
         floorSearchTime = 0
         canOfferVirtualMode = false
     }
 
-    /// Anchors the scene to the first usable course surface found by AR.
-    func installCourseSurfaceAnchor() {
-        // Detach the previously resolved surface before looking for a new one.
+    /// Resets circuit placement before AR starts discovering a new surface.
+    func prepareCourseSurfacePlacement() {
         anchorRoot.components.remove(AnchoringComponent.self)
         anchorRoot.transform = .identity
         root.position = .zero
@@ -383,15 +386,31 @@ final class RaceGame {
         courseScale = 1
         isCourseAnchored = false
         isCoursePlaced = false
+        requiresCourseSurfaceAnchor = true
         floorSearchTime = 0
         canOfferVirtualMode = false
+    }
+
+    /// Anchors the prepared circuit to the first usable surface found by AR.
+    func installCourseSurfaceAnchor() {
+        prepareCourseSurfacePlacement()
         anchorRoot.components.set(AnchoringComponent(Self.courseSurfaceAnchorTarget))
+    }
+
+    /// Recreates the world-origin anchor after an ARSession tracking reset.
+    func installRoomWorldAnchor() {
+        roomRoot.components.remove(AnchoringComponent.self)
+        roomRoot.transform = .identity
+        roomRoot.components.set(
+            AnchoringComponent(.world(transform: matrix_identity_float4x4))
+        )
     }
 
     /// Room driving and the virtual camera do not use the tabletop anchor.
     func removeCourseSurfaceAnchor() {
         anchorRoot.components.remove(AnchoringComponent.self)
         isCourseAnchored = true
+        requiresCourseSurfaceAnchor = false
     }
 
     /// Captures the course root in AR world coordinates for a nearby guest.
@@ -486,11 +505,13 @@ final class RaceGame {
             root.position = .zero
             root.orientation = simd_quatf(angle: 0, axis: [0, 1, 0])
             isCourseAnchored = false
+            requiresCourseSurfaceAnchor = true
         } else {
             anchorRoot.components.remove(AnchoringComponent.self)
             root.position = [placement.x, placement.y, placement.z]
             root.orientation = rotation
             isCourseAnchored = true
+            requiresCourseSurfaceAnchor = false
         }
         courseScale = placement.scale
         courseRotation = 0
@@ -536,6 +557,27 @@ final class RaceGame {
     }
 
     // MARK: - Room free drive
+
+    /// Drops the captured world when leaving gameplay so the next mode starts
+    /// with a fresh AR placement session.
+    func clearRoomDriveSetup() {
+        roomEnvironment = nil
+        hasScannedRoom = false
+        roomStartPlaced = false
+        roomStartPosition = nil
+        roomStartHeading = 0
+        roomObstacleCount = 0
+
+        roomOcclusionRoot?.removeFromParent()
+        roomOcclusionRoot = nil
+        roomVisualizationRoot?.removeFromParent()
+        roomVisualizationRoot = nil
+        roomRoot.isEnabled = false
+
+        if mode == .roomDrive {
+            placeCarsOnGrid()
+        }
+    }
 
     /// Installs one RoomPlan result in the still-running AR world. The player
     /// chooses a safe start point afterward by aiming at the scanned floor.
@@ -772,7 +814,7 @@ final class RaceGame {
     /// Advances the game by one frame. Called from the scene's update event.
     func update(deltaTime: TimeInterval) {
         let anchored = mode == .roomDrive
-            || !anchorRoot.components.has(AnchoringComponent.self)
+            || !requiresCourseSurfaceAnchor
             || anchorRoot.isAnchored
         if anchored != isCourseAnchored { isCourseAnchored = anchored }
 
