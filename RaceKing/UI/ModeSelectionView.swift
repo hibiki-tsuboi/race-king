@@ -38,12 +38,8 @@ struct ModeSelectionView: View {
                         .accessibilityLabel("タイトルに戻る")
 
                         Spacer()
-
-                        Text("ANYWHERE GP")
-                            .font(.caption.weight(.black))
-                            .tracking(2)
-                            .foregroundStyle(.white.opacity(0.65))
                     }
+                    .offset(y: -8)
 
                     VStack(spacing: 5) {
                         Text("遊ぶモードを選択")
