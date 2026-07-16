@@ -16,7 +16,6 @@ struct GameOverlayView: View {
 
     @Bindable var game: RaceGame
     @Bindable var multiplayer: PeerRaceSession
-    var roomPlanSupported = false
     var canScanRoom = false
     var onScanRoom: () -> Void = {}
     var onChooseMode: () -> Void = {}
@@ -77,20 +76,6 @@ struct GameOverlayView: View {
                         .font(.callout.bold())
                         .multilineTextAlignment(.center)
                         .foregroundStyle(.white)
-                    if roomPlanSupported && canScanRoom {
-                        Button {
-                            game.mode = .roomDrive
-                            onScanRoom()
-                        } label: {
-                            Label("部屋をスキャンしてフリー走行", systemImage: "viewfinder")
-                                .font(.headline.bold())
-                                .foregroundStyle(.white)
-                                .padding(.horizontal, 20)
-                                .padding(.vertical, 10)
-                                .background(.blue.gradient, in: Capsule())
-                        }
-                        .buttonStyle(.plain)
-                    }
                     if game.canOfferVirtualMode {
                         Button {
                             game.activateVirtualMode()

@@ -52,7 +52,6 @@ struct ContentView: View {
                 GameOverlayView(
                     game: game,
                     multiplayer: multiplayer,
-                    roomPlanSupported: roomPlanSupported && !game.virtualModeActive,
                     canScanRoom: canScanRoom,
                     onScanRoom: startRoomScan,
                     onChooseMode: returnToModeSelection,
