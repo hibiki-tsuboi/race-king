@@ -32,6 +32,7 @@ struct ContentView: View {
     @State private var spatialTrackingGeneration: UInt = 0
     @State private var spatialTrackingOperation: Task<Void, Never>?
     @State private var roomScanError: String?
+    @State private var courseDragOffset: SIMD3<Float>?
     @State private var courseScaleAtPinchStart: Float?
     @State private var courseRotationAtGestureStart: Float?
     @State private var realityViewSize = CGSize.zero
@@ -198,11 +199,13 @@ struct ContentView: View {
         .simultaneousGesture(
             DragGesture(minimumDistance: 15)
                 .onChanged { value in
-                    if game.mode != .roomDrive,
-                       courseScaleAtPinchStart == nil,
-                       courseRotationAtGestureStart == nil {
-                        placeCourse(at: value.location)
-                    }
+                    dragCourse(
+                        from: value.startLocation,
+                        to: value.location
+                    )
+                }
+                .onEnded { _ in
+                    courseDragOffset = nil
                 }
         )
         .simultaneousGesture(courseScaleGesture)
@@ -274,6 +277,7 @@ struct ContentView: View {
         }
         audio.setEngine(speedRatio: 0, running: false)
         isPreparingRoomScan = false
+        courseDragOffset = nil
         courseScaleAtPinchStart = nil
         courseRotationAtGestureStart = nil
         // The RealityView and SpatialTrackingSession persist across the app's
@@ -577,14 +581,74 @@ struct ContentView: View {
             }
     }
 
-    /// Converts the touched viewport point into an AR ray. Normal circuits
-    /// use the first horizontal surface hit; RoomPlan intersects the same ray
-    /// with its captured floor so both modes honor the visible tap location.
+    /// Moves the circuit by the finger's surface delta so grabbing anywhere
+    /// on it does not snap its center underneath the touch.
+    private func dragCourse(from startPoint: CGPoint, to currentPoint: CGPoint) {
+        guard game.phase == .ready, game.mode != .roomDrive,
+              game.isCourseAnchored, !game.virtualModeActive,
+              canEditCoursePlacement,
+              courseScaleAtPinchStart == nil,
+              courseRotationAtGestureStart == nil else {
+            courseDragOffset = nil
+            return
+        }
+        guard let currentWorldPoint = courseSurfacePoint(at: currentPoint) else {
+            return
+        }
+
+        if !game.isCoursePlaced {
+            courseDragOffset = .zero
+            game.moveCourse(toWorldPoint: currentWorldPoint)
+            return
+        }
+
+        let currentLocalPoint = game.anchorRoot.convert(
+            position: currentWorldPoint,
+            from: nil
+        )
+        if courseDragOffset == nil {
+            let startWorldPoint = courseSurfacePoint(at: startPoint)
+                ?? currentWorldPoint
+            let startLocalPoint = game.anchorRoot.convert(
+                position: startWorldPoint,
+                from: nil
+            )
+            courseDragOffset = game.root.position - startLocalPoint
+        }
+        guard let courseDragOffset else { return }
+        game.moveCourse(to: currentLocalPoint + courseDragOffset)
+    }
+
+    /// Recenters a normal circuit at the touched surface point. RoomPlan uses
+    /// the same ray to place its start marker on the captured floor.
     private func placeCourse(at screenPoint: CGPoint) {
         guard !game.virtualModeActive,
               game.mode == .roomDrive || canEditCoursePlacement,
-              realityViewSize.width > 0, realityViewSize.height > 0,
-              let frame = arSession.currentFrame else { return }
+              let query = courseRaycastQuery(at: screenPoint) else { return }
+
+        if game.mode == .roomDrive {
+            game.placeRoomStart(
+                alongRayFrom: query.origin, direction: query.direction
+            )
+        } else if let result = arSession.raycast(query).first {
+            let translation = result.worldTransform.columns.3
+            game.moveCourse(toWorldPoint: [
+                translation.x, translation.y, translation.z,
+            ])
+        }
+    }
+
+    private func courseSurfacePoint(at screenPoint: CGPoint) -> SIMD3<Float>? {
+        guard let query = courseRaycastQuery(at: screenPoint),
+              let result = arSession.raycast(query).first else { return nil }
+        let translation = result.worldTransform.columns.3
+        return [translation.x, translation.y, translation.z]
+    }
+
+    /// Converts a viewport point into an AR ray against horizontal surfaces.
+    private func courseRaycastQuery(at screenPoint: CGPoint) -> ARRaycastQuery? {
+        guard realityViewSize.width > 0, realityViewSize.height > 0,
+              let frame = arSession.currentFrame else { return nil }
 
         let normalizedViewPoint = CGPoint(
             x: max(0, min(1, screenPoint.x / realityViewSize.width)),
@@ -598,20 +662,9 @@ struct ContentView: View {
             for: orientation, viewportSize: realityViewSize
         ).inverted()
         let imagePoint = normalizedViewPoint.applying(viewToImage)
-        let query = frame.raycastQuery(
+        return frame.raycastQuery(
             from: imagePoint, allowing: .estimatedPlane, alignment: .horizontal
         )
-
-        if game.mode == .roomDrive {
-            game.placeRoomStart(
-                alongRayFrom: query.origin, direction: query.direction
-            )
-        } else if let result = arSession.raycast(query).first {
-            let translation = result.worldTransform.columns.3
-            game.moveCourse(toWorldPoint: [
-                translation.x, translation.y, translation.z,
-            ])
-        }
     }
     #endif
 
