@@ -15,6 +15,7 @@ private final class PeerConnectionContext {
     var playerID: UUID?
     var receiveBuffer = Data()
     var handshakeTimeoutTask: Task<Void, Never>?
+    var carModelViolationCount = 0
 
     init(connection: NWConnection, rejectionMessage: String? = nil) {
         self.connection = connection
@@ -23,6 +24,24 @@ private final class PeerConnectionContext {
 }
 
 private struct StoredPeerCarModel {
+    let id: UUID
+    let data: Data
+    let flipped: Bool
+}
+
+private struct RemoteCarModelBudget {
+    var bytes = 0
+    var transferCount = 0
+    var lastTransferTime: TimeInterval?
+}
+
+private struct PeerFinishRecord {
+    let raceTime: TimeInterval
+    let hostFinishTime: TimeInterval
+}
+
+private struct PendingRemoteCarModelLoad {
+    let ownerID: UUID
     let id: UUID
     let data: Data
     let flipped: Bool
@@ -84,6 +103,9 @@ final class PeerRaceSession {
     static let maximumPlayers = 5
     private static let serviceType = "_anywheregp._tcp"
     private static let maximumPacketSize = 64 * 1024 * 1024
+    /// Guests never send world maps, so their largest valid frame is one
+    /// base64-encoded 12 MB car model plus a small JSON envelope.
+    private static let maximumGuestToHostPacketSize = 17 * 1024 * 1024
     /// A hello only contains the guest ID, display name, version, and car choice.
     private static let maximumHelloPacketSize = 4 * 1024
     /// Limits sockets that have not yet supplied a valid hello packet.
@@ -91,7 +113,24 @@ final class PeerRaceSession {
     private static let handshakeTimeout: Duration = .seconds(5)
     private static let maximumWorldMapSize = 40 * 1024 * 1024
     private static let maximumCarModelSize = 12 * 1024 * 1024
+    private static let maximumRemoteCarModelBytesPerParticipant = 24 * 1024 * 1024
+    private static let maximumRemoteCarModelBytesPerSession = 72 * 1024 * 1024
+    private static let maximumRemoteCarModelTransfersPerParticipant = 3
+    private static let minimumRemoteCarModelTransferInterval: TimeInterval = 1
+    private static let maximumCarModelViolations = 3
+    private static let maximumConcurrentRemoteCarModelLoads = 1
     private static let snapshotInterval: TimeInterval = 1.0 / 20.0
+    /// The countdown itself lasts three seconds; this lead time lets every
+    /// peer receive the command and schedule that countdown against one clock.
+    private static let raceStartLeadTime: TimeInterval = 1.5
+    private static let minimumScheduledStartLeadTime: TimeInterval = 0.15
+    private static let maximumScheduledStartLeadTime: TimeInterval = 10
+    private static let maximumClockSyncRoundTripTime: TimeInterval = 0.5
+    private static let clockSyncRefreshInterval: Duration = .seconds(5)
+    /// Parsing arbitrary peer-provided RealityKit scenes cannot be placed in
+    /// a crash-isolated process on iOS. Keep custom cars local until a format
+    /// with enforceable mesh/texture budgets replaces raw USDZ sharing.
+    private static let importedCarSharingEnabled = false
     private static let carChoiceDefaultsKey = "peerRaceCarChoice"
 
     let localPlayerID: UUID
@@ -138,7 +177,8 @@ final class PeerRaceSession {
 
     var availableLocalCarChoices: [RaceCarChoice] {
         RaceCarChoice.allCases.filter {
-            $0 != .imported || localImportedCarAvailable
+            $0 != .imported
+                || Self.importedCarSharingEnabled && localImportedCarAvailable
         }
     }
 
@@ -174,7 +214,7 @@ final class PeerRaceSession {
     }
 
     var canStartRace: Bool {
-        state == .connected && role == .host
+        state == .connected && role == .host && !raceInProgress
             && courseSyncState == .synchronized
             && participants.count >= 2
             && carModelsSynchronized
@@ -186,6 +226,7 @@ final class PeerRaceSession {
     var canSetReady: Bool {
         state == .connected && participants.count >= 2
             && isCourseSynchronized && carModelsSynchronized
+            && (role == .host || hostClockOffset != nil)
     }
 
     var canRequestCourseShare: Bool {
@@ -245,7 +286,21 @@ final class PeerRaceSession {
     @ObservationIgnored private var localCarModelTransferID: UUID?
     @ObservationIgnored private var snapshotAccumulator: TimeInterval = 0
     @ObservationIgnored private var finishOrder: [UUID] = []
-    @ObservationIgnored private var raceInProgress = false
+    @ObservationIgnored private var finishRecords: [UUID: PeerFinishRecord] = [:]
+    private var raceInProgress = false
+    @ObservationIgnored private var currentRoundID: UUID?
+    @ObservationIgnored private var scheduledHostStartTime: TimeInterval?
+    @ObservationIgnored private var scheduledRaceStartTask: Task<Void, Never>?
+    @ObservationIgnored private var clockSyncTask: Task<Void, Never>?
+    @ObservationIgnored private var pendingClockProbes: [UInt64: TimeInterval] = [:]
+    @ObservationIgnored private var nextClockSequence: UInt64 = 0
+    @ObservationIgnored private var bestClockRoundTripTime: TimeInterval?
+    private var hostClockOffset: TimeInterval?
+    @ObservationIgnored private var activeRemoteCarModelLoads: [UUID: UUID] = [:]
+    @ObservationIgnored private var pendingRemoteCarModelLoads: [PendingRemoteCarModelLoad] = []
+    @ObservationIgnored private var remoteCarModelBudgets: [UUID: RemoteCarModelBudget] = [:]
+    @ObservationIgnored private var remoteCarModelSessionBytes = 0
+    @ObservationIgnored private var remoteCarModelViolationCount = 0
     @ObservationIgnored private var lastConnectionNotification = false
     @ObservationIgnored private let encoder = JSONEncoder()
     @ObservationIgnored private let decoder = JSONDecoder()
@@ -262,7 +317,14 @@ final class PeerRaceSession {
             ) ?? ""
         ) ?? .green
         let initialCarChoice: RaceCarChoice = saved == .imported
-            && !importedCarAvailable ? .green : saved
+            && (!Self.importedCarSharingEnabled || !importedCarAvailable)
+            ? .green : saved
+        if initialCarChoice != saved {
+            UserDefaults.standard.set(
+                initialCarChoice.rawValue,
+                forKey: Self.carChoiceDefaultsKey
+            )
+        }
         localCarChoice = initialCarChoice
         participants = [PeerRaceParticipant(
             id: localPlayerID,
@@ -354,6 +416,10 @@ final class PeerRaceSession {
     func disconnect() {
         let wasConnected = lastConnectionNotification
         lastConnectionNotification = false
+        scheduledRaceStartTask?.cancel()
+        scheduledRaceStartTask = nil
+        clockSyncTask?.cancel()
+        clockSyncTask = nil
         listener?.stateUpdateHandler = nil
         listener?.newConnectionHandler = nil
         listener?.cancel()
@@ -406,7 +472,8 @@ final class PeerRaceSession {
 
     /// Persists and shares a car selection. Any change cancels every READY.
     func setLocalCarChoice(_ choice: RaceCarChoice) {
-        guard choice != localCarChoice, !raceInProgress else { return }
+        guard choice != localCarChoice, !raceInProgress,
+              choice != .imported || Self.importedCarSharingEnabled else { return }
         let importedData: Data?
         if choice == .imported {
             do {
@@ -450,6 +517,10 @@ final class PeerRaceSession {
     /// Re-sends a replaced or flipped imported model while it is selected.
     func refreshLocalImportedCar() {
         localImportedCarAvailable = EntityFactory.hasImportedPlayerCar
+        guard Self.importedCarSharingEnabled else {
+            if localCarChoice == .imported { setLocalCarChoice(.green) }
+            return
+        }
         guard localImportedCarAvailable else {
             localCarModelErrorMessage = nil
             if localCarChoice == .imported { setLocalCarChoice(.green) }
@@ -494,7 +565,9 @@ final class PeerRaceSession {
 
     /// Called after RealityKit loads a received participant model.
     func confirmRemoteImportedCarModel(playerID: UUID, id: UUID) {
-        guard isCurrentRemoteImportedCarModel(playerID: playerID, id: id) else { return }
+        guard activeRemoteCarModelLoads[playerID] == id,
+              isCurrentRemoteImportedCarModel(playerID: playerID, id: id) else { return }
+        activeRemoteCarModelLoads.removeValue(forKey: playerID)
         remoteCarModelErrorMessages.removeValue(forKey: playerID)
         if role == .host {
             modelAcknowledgements[playerID, default: []].insert(localPlayerID)
@@ -509,13 +582,16 @@ final class PeerRaceSession {
             remoteImportedCarReadyIDs.insert(playerID)
             _ = sendToHost(.carModelReady(playerID: playerID, id: id))
         }
+        startNextRemoteCarModelLoadIfNeeded()
     }
 
     /// Reports a USDZ that RealityKit could not load on this device.
     func failRemoteImportedCarModel(
         playerID: UUID, id: UUID, message: String
     ) {
-        guard isCurrentRemoteImportedCarModel(playerID: playerID, id: id) else { return }
+        guard activeRemoteCarModelLoads[playerID] == id,
+              isCurrentRemoteImportedCarModel(playerID: playerID, id: id) else { return }
+        activeRemoteCarModelLoads.removeValue(forKey: playerID)
         let safeMessage = String(message.prefix(160))
         remoteCarModelErrorMessages[playerID] = safeMessage
         if role == .host {
@@ -544,6 +620,7 @@ final class PeerRaceSession {
                 message: safeMessage
             ))
         }
+        startNextRemoteCarModelLoadIfNeeded()
     }
 
     // MARK: - Course sharing
@@ -625,11 +702,22 @@ final class PeerRaceSession {
     // MARK: - Race
 
     func requestStartRace() {
-        guard canStartRace else { return }
-        guard onStartRace?() == true else { return }
+        guard canStartRace, scheduledRaceStartTask == nil else { return }
+        let roundID = UUID()
+        let hostStartTime = monotonicTime + Self.raceStartLeadTime
+        guard broadcast(.startRace(
+            roundID: roundID,
+            hostStartTime: hostStartTime
+        )) else {
+            broadcast(.resetRace)
+            errorMessage = "レース開始情報を送信できませんでした"
+            return
+        }
         raceInProgress = true
         resetFinishState()
-        broadcast(.startRace)
+        currentRoundID = roundID
+        scheduledHostStartTime = hostStartTime
+        scheduleRaceStart(roundID: roundID, localStartTime: hostStartTime)
     }
 
     func requestResetRace() {
@@ -659,14 +747,125 @@ final class PeerRaceSession {
 
     func reportLocalFinish(raceTime: TimeInterval) {
         guard state == .connected, raceInProgress,
-              !finishOrder.contains(localPlayerID) else { return }
+              !finishOrder.contains(localPlayerID),
+              finishRecords[localPlayerID] == nil,
+              let roundID = currentRoundID else { return }
+        let hostFinishTime = estimatedHostTime
         if role == .host {
-            recordFinish(playerID: localPlayerID, raceTime: raceTime)
-        } else {
-            _ = sendToHost(.finish(
+            recordFinish(
                 playerID: localPlayerID,
-                raceTime: raceTime
-            ))
+                roundID: roundID,
+                raceTime: raceTime,
+                hostFinishTime: hostFinishTime
+            )
+        } else {
+            let record = PeerFinishRecord(
+                raceTime: raceTime,
+                hostFinishTime: hostFinishTime
+            )
+            if sendToHost(.finish(
+                playerID: localPlayerID,
+                roundID: roundID,
+                raceTime: raceTime,
+                hostFinishTime: hostFinishTime
+            )) {
+                finishRecords[localPlayerID] = record
+            }
+        }
+    }
+
+    private var monotonicTime: TimeInterval {
+        ProcessInfo.processInfo.systemUptime
+    }
+
+    private var estimatedHostTime: TimeInterval {
+        monotonicTime + (role == .guest ? hostClockOffset ?? 0 : 0)
+    }
+
+    private func beginClockSynchronization() {
+        clockSyncTask?.cancel()
+        pendingClockProbes.removeAll()
+        bestClockRoundTripTime = nil
+        hostClockOffset = nil
+        nextClockSequence = 0
+        clockSyncTask = Task { [weak self] in
+            var initialProbeCount = 0
+            while !Task.isCancelled {
+                guard let self, self.role == .guest,
+                      self.state == .connected else { return }
+                self.sendClockSyncProbe()
+                initialProbeCount += 1
+                do {
+                    if initialProbeCount < 4 {
+                        try await Task.sleep(for: .milliseconds(150))
+                    } else {
+                        try await Task.sleep(for: Self.clockSyncRefreshInterval)
+                    }
+                } catch {
+                    return
+                }
+            }
+        }
+    }
+
+    private func sendClockSyncProbe() {
+        nextClockSequence &+= 1
+        let sequence = nextClockSequence
+        let sendTime = monotonicTime
+        pendingClockProbes[sequence] = sendTime
+        if pendingClockProbes.count > 8,
+           let oldest = pendingClockProbes.keys.min() {
+            pendingClockProbes.removeValue(forKey: oldest)
+        }
+        _ = sendToHost(.clockSyncRequest(
+            sequence: sequence,
+            clientSendTime: sendTime
+        ))
+    }
+
+    private func receiveClockSyncResponse(_ packet: PeerRacePacket) {
+        guard role == .guest,
+              let sequence = packet.clockSequence,
+              let echoedSendTime = packet.clientSendTime,
+              let hostTime = packet.hostTime,
+              let sendTime = pendingClockProbes.removeValue(forKey: sequence),
+              echoedSendTime.isFinite, hostTime.isFinite,
+              abs(echoedSendTime - sendTime) < 0.001 else { return }
+        let receiveTime = monotonicTime
+        let roundTripTime = receiveTime - sendTime
+        guard roundTripTime >= 0,
+              roundTripTime <= Self.maximumClockSyncRoundTripTime else { return }
+        let offset = hostTime - ((sendTime + receiveTime) / 2)
+        guard offset.isFinite else { return }
+        if bestClockRoundTripTime.map({ roundTripTime < $0 }) ?? true {
+            bestClockRoundTripTime = roundTripTime
+            hostClockOffset = offset
+        }
+    }
+
+    private func scheduleRaceStart(roundID: UUID, localStartTime: TimeInterval) {
+        scheduledRaceStartTask?.cancel()
+        let delay = max(0, localStartTime - monotonicTime)
+        scheduledRaceStartTask = Task { [weak self] in
+            do {
+                try await Task.sleep(
+                    for: .nanoseconds(Int64(delay * 1_000_000_000))
+                )
+            } catch {
+                return
+            }
+            guard let self, self.raceInProgress,
+                  self.currentRoundID == roundID else { return }
+            self.scheduledRaceStartTask = nil
+            guard self.onStartRace?() == true else {
+                if self.role == .host {
+                    self.errorMessage = "コース位置を確認できないためレースを開始できませんでした"
+                    self.performHostReset()
+                } else {
+                    self.failSession("コース位置を確認できないためレースを開始できませんでした")
+                }
+                return
+            }
         }
     }
 
@@ -795,6 +994,7 @@ final class PeerRaceSession {
                     name: localPlayerName,
                     carChoice: localCarChoice
                 ))
+                beginClockSynchronization()
                 if localCarChoice == .imported { sendGuestLocalModel() }
             }
         case .failed(let error):
@@ -969,9 +1169,14 @@ final class PeerRaceSession {
         let headerSize = MemoryLayout<UInt32>.size
         while context.receiveBuffer.count >= headerSize {
             let awaitingHello = isAwaitingGuestHello(context)
-            let maximumPacketSize = awaitingHello
-                ? Self.maximumHelloPacketSize
-                : Self.maximumPacketSize
+            let maximumPacketSize: Int
+            if awaitingHello {
+                maximumPacketSize = Self.maximumHelloPacketSize
+            } else if role == .host {
+                maximumPacketSize = Self.maximumGuestToHostPacketSize
+            } else {
+                maximumPacketSize = Self.maximumPacketSize
+            }
             let length = context.receiveBuffer.prefix(headerSize).reduce(UInt32(0)) {
                 ($0 << 8) | UInt32($1)
             }
@@ -997,6 +1202,7 @@ final class PeerRaceSession {
                 } else {
                     handleGuestPacket(packet)
                 }
+                guard connections[context.id] != nil else { return false }
             } catch {
                 connectionLost(
                     context,
@@ -1041,6 +1247,18 @@ final class PeerRaceSession {
         case .carModel:
             guard !raceInProgress, packet.playerID == senderID else { return }
             receiveCarModel(packet, ownerID: senderID)
+        case .clockSyncRequest:
+            guard let sequence = packet.clockSequence,
+                  let clientSendTime = packet.clientSendTime,
+                  clientSendTime.isFinite else { return }
+            _ = send(
+                .clockSyncResponse(
+                    sequence: sequence,
+                    clientSendTime: clientSendTime,
+                    hostTime: monotonicTime
+                ),
+                to: context
+            )
         case .carModelReady:
             guard let ownerID = packet.playerID,
                   let modelID = packet.carModelID,
@@ -1086,15 +1304,22 @@ final class PeerRaceSession {
             )
         case .finish:
             guard packet.playerID == senderID,
-                  let raceTime = packet.raceTime else { return }
-            recordFinish(playerID: senderID, raceTime: raceTime)
+                  let roundID = packet.roundID,
+                  let raceTime = packet.raceTime,
+                  let hostFinishTime = packet.hostFinishTime else { return }
+            recordFinish(
+                playerID: senderID,
+                roundID: roundID,
+                raceTime: raceTime,
+                hostFinishTime: hostFinishTime
+            )
         case .resetRace:
             // Whole-race resets are host-authoritative. Older guests may still
             // send this packet, so ignore it instead of interrupting everyone.
             break
         case .hello, .roster, .joinRejected, .courseSyncReset,
              .courseSyncStarted, .courseMap, .courseSyncCompleted,
-             .startRace, .finishResult, .raceComplete:
+             .clockSyncResponse, .startRace, .finishResult, .raceComplete:
             break
         }
     }
@@ -1114,6 +1339,10 @@ final class PeerRaceSession {
               participant(id: playerID) == nil,
               let carChoice = packet.carChoice else {
             reject(context, message: "このルームには参加できません")
+            return
+        }
+        guard Self.importedCarSharingEnabled || carChoice != .imported else {
+            reject(context, message: "ネットワーク対戦ではカスタム車を共有できません")
             return
         }
         let usedSlots = Set(participants.map(\.slot))
@@ -1188,6 +1417,11 @@ final class PeerRaceSession {
         switch packet.kind {
         case .roster:
             guard let roster = packet.participants else { return }
+            guard Self.importedCarSharingEnabled
+                    || roster.allSatisfy({ $0.carChoice != .imported }) else {
+                failSession("ネットワーク対戦で未対応のカスタム車を受信しました")
+                return
+            }
             receiveRoster(roster)
         case .joinRejected:
             failSession(packet.message ?? "ルームに参加できませんでした")
@@ -1256,15 +1490,30 @@ final class PeerRaceSession {
                 (packet.message ?? "別の端末でカスタム車を読み込めませんでした").prefix(160)
             )
             notifyParticipantsChanged()
+        case .clockSyncResponse:
+            receiveClockSyncResponse(packet)
         case .startRace:
-            guard isCourseSynchronized, carModelsSynchronized,
+            guard !raceInProgress,
+                  isCourseSynchronized, carModelsSynchronized,
                   participants.count >= 2 else { return }
-            guard onStartRace?() == true else {
-                failSession("コース位置を確認できないためレースを開始できませんでした")
+            guard let roundID = packet.roundID,
+                  let hostStartTime = packet.hostStartTime,
+                  let hostClockOffset else {
+                failSession("レース開始時刻を同期できませんでした")
+                return
+            }
+            let localStartTime = hostStartTime - hostClockOffset
+            let leadTime = localStartTime - monotonicTime
+            guard leadTime >= Self.minimumScheduledStartLeadTime,
+                  leadTime <= Self.maximumScheduledStartLeadTime else {
+                failSession("レース開始時刻を同期できませんでした")
                 return
             }
             raceInProgress = true
             resetFinishState()
+            currentRoundID = roundID
+            scheduledHostStartTime = hostStartTime
+            scheduleRaceStart(roundID: roundID, localStartTime: localStartTime)
         case .carState:
             guard raceInProgress, isCourseSynchronized,
                   let playerID = packet.playerID,
@@ -1274,6 +1523,7 @@ final class PeerRaceSession {
             onCarState?(playerID, carState)
         case .finishResult:
             guard packet.playerID == localPlayerID,
+                  packet.roundID == currentRoundID,
                   let position = packet.position,
                   let raceTime = packet.raceTime else { return }
             if !finishOrder.contains(localPlayerID) { finishOrder.append(localPlayerID) }
@@ -1284,7 +1534,8 @@ final class PeerRaceSession {
             raceInProgress = false
             resetRoundState()
             onResetRace?()
-        case .hello, .ready, .carSelection, .courseMapApplied, .finish:
+        case .hello, .ready, .carSelection, .courseMapApplied,
+             .clockSyncRequest, .finish:
             break
         }
     }
@@ -1310,6 +1561,12 @@ final class PeerRaceSession {
         remoteCarModelTransferIDs = remoteCarModelTransferIDs.filter {
             newRemoteIDs.contains($0.key)
         }
+        activeRemoteCarModelLoads = activeRemoteCarModelLoads.filter {
+            newRemoteIDs.contains($0.key)
+        }
+        pendingRemoteCarModelLoads.removeAll {
+            !newRemoteIDs.contains($0.ownerID)
+        }
         remoteCarModelErrorMessages = remoteCarModelErrorMessages.filter {
             newRemoteIDs.contains($0.key)
         }
@@ -1319,9 +1576,17 @@ final class PeerRaceSession {
                 remoteImportedCarReadyIDs.remove(participant.id)
                 remoteCarModelTransferIDs.removeValue(forKey: participant.id)
                 remoteCarModelErrorMessages.removeValue(forKey: participant.id)
+                activeRemoteCarModelLoads.removeValue(forKey: participant.id)
+                pendingRemoteCarModelLoads.removeAll {
+                    $0.ownerID == participant.id
+                }
             } else if oldChoice != .imported {
                 remoteImportedCarReadyIDs.remove(participant.id)
                 remoteCarModelTransferIDs.removeValue(forKey: participant.id)
+                activeRemoteCarModelLoads.removeValue(forKey: participant.id)
+                pendingRemoteCarModelLoads.removeAll {
+                    $0.ownerID == participant.id
+                }
             }
         }
         participants = roster.sorted { $0.slot < $1.slot }
@@ -1330,6 +1595,7 @@ final class PeerRaceSession {
             onLocalCarChoiceChanged?(local.carChoice)
         }
         notifyParticipantsChanged()
+        startNextRemoteCarModelLoadIfNeeded()
     }
 
     // MARK: - Imported models
@@ -1337,18 +1603,45 @@ final class PeerRaceSession {
     private func receiveCarModel(
         _ packet: PeerRacePacket, ownerID: UUID
     ) {
+        guard Self.importedCarSharingEnabled else {
+            if role == .guest {
+                failSession("ネットワーク対戦で未対応のカスタム車を受信しました")
+            } else {
+                registerCarModelViolation(ownerID: ownerID)
+            }
+            return
+        }
         guard participant(id: ownerID)?.carChoice == .imported,
               let id = packet.carModelID,
               let data = packet.carModelData,
               let flipped = packet.carModelFlipped else { return }
-        guard isValidUSDZ(data), data.count <= Self.maximumCarModelSize else {
+        guard data.count <= Self.maximumCarModelSize else {
+            rejectIncomingCarModel(
+                ownerID: ownerID,
+                id: id,
+                message: "カスタム車が12MBを超えています"
+            )
+            return
+        }
+        if let admissionError = remoteCarModelAdmissionError(
+            ownerID: ownerID,
+            byteCount: data.count
+        ) {
+            rejectIncomingCarModel(
+                ownerID: ownerID,
+                id: id,
+                message: admissionError
+            )
+            return
+        }
+        guard isValidUSDZ(data) else {
             rejectRemoteCarModel(
                 ownerID: ownerID,
                 id: id,
-                message: data.count > Self.maximumCarModelSize
-                    ? "カスタム車が12MBを超えています"
-                    : "カスタム車を読み取れません"
+                message: "カスタム車を読み取れません",
+                clearCurrentModel: false
             )
+            registerCarModelViolation(ownerID: ownerID)
             return
         }
 
@@ -1367,24 +1660,122 @@ final class PeerRaceSession {
             notifyParticipantsChanged()
             _ = sendToHost(.ready(playerID: localPlayerID, isReady: false))
         }
-        guard let onRemoteImportedCarModel else {
+        guard onRemoteImportedCarModel != nil else {
             rejectRemoteCarModel(
                 ownerID: ownerID,
                 id: id,
-                message: "カスタム車を読み込めません"
+                message: "カスタム車を読み込めません",
+                clearCurrentModel: true
             )
             return
         }
-        onRemoteImportedCarModel(ownerID, data, flipped, id)
+        pendingRemoteCarModelLoads.append(PendingRemoteCarModelLoad(
+            ownerID: ownerID,
+            id: id,
+            data: data,
+            flipped: flipped
+        ))
+        startNextRemoteCarModelLoadIfNeeded()
+    }
+
+    private func startNextRemoteCarModelLoadIfNeeded() {
+        guard activeRemoteCarModelLoads.count
+                < Self.maximumConcurrentRemoteCarModelLoads,
+              !pendingRemoteCarModelLoads.isEmpty,
+              let onRemoteImportedCarModel else { return }
+        let next = pendingRemoteCarModelLoads.removeFirst()
+        guard isCurrentRemoteImportedCarModel(
+            playerID: next.ownerID,
+            id: next.id
+        ) else {
+            startNextRemoteCarModelLoadIfNeeded()
+            return
+        }
+        activeRemoteCarModelLoads[next.ownerID] = next.id
+        onRemoteImportedCarModel(
+            next.ownerID,
+            next.data,
+            next.flipped,
+            next.id
+        )
+    }
+
+    private func removeRemoteCarModelLoads(for ownerID: UUID) {
+        pendingRemoteCarModelLoads.removeAll { $0.ownerID == ownerID }
+        activeRemoteCarModelLoads.removeValue(forKey: ownerID)
+        startNextRemoteCarModelLoadIfNeeded()
+    }
+
+    private func remoteCarModelAdmissionError(
+        ownerID: UUID, byteCount: Int
+    ) -> String? {
+        if activeRemoteCarModelLoads[ownerID] != nil
+            || pendingRemoteCarModelLoads.contains(where: { $0.ownerID == ownerID }) {
+            return "前のカスタム車を読み込み中です"
+        }
+        var budget = remoteCarModelBudgets[ownerID] ?? RemoteCarModelBudget()
+        let now = monotonicTime
+        if let lastTransferTime = budget.lastTransferTime,
+           now - lastTransferTime < Self.minimumRemoteCarModelTransferInterval {
+            return "カスタム車の送信間隔が短すぎます"
+        }
+        guard budget.transferCount < Self.maximumRemoteCarModelTransfersPerParticipant,
+              budget.bytes <= Self.maximumRemoteCarModelBytesPerParticipant - byteCount,
+              remoteCarModelSessionBytes <= Self.maximumRemoteCarModelBytesPerSession - byteCount
+        else {
+            return "この対戦で共有できるカスタム車の上限を超えました"
+        }
+        budget.transferCount += 1
+        budget.bytes += byteCount
+        budget.lastTransferTime = now
+        remoteCarModelBudgets[ownerID] = budget
+        remoteCarModelSessionBytes += byteCount
+        return nil
+    }
+
+    private func rejectIncomingCarModel(
+        ownerID: UUID, id: UUID, message: String
+    ) {
+        rejectRemoteCarModel(
+            ownerID: ownerID,
+            id: id,
+            message: message,
+            clearCurrentModel: false
+        )
+        registerCarModelViolation(ownerID: ownerID)
+    }
+
+    private func registerCarModelViolation(ownerID: UUID) {
+        if role == .host, let ownerContext = context(for: ownerID) {
+            ownerContext.carModelViolationCount += 1
+            if ownerContext.carModelViolationCount >= Self.maximumCarModelViolations {
+                connectionLost(
+                    ownerContext,
+                    message: "カスタム車の送信上限を超えたため接続を終了しました"
+                )
+            }
+        } else if role == .guest {
+            remoteCarModelViolationCount += 1
+            if remoteCarModelViolationCount >= Self.maximumCarModelViolations {
+                failSession("カスタム車データが繰り返し拒否されたため接続を終了しました")
+            }
+        }
     }
 
     private func rejectRemoteCarModel(
-        ownerID: UUID, id: UUID, message: String
+        ownerID: UUID,
+        id: UUID,
+        message: String,
+        clearCurrentModel: Bool
     ) {
         let safeMessage = String(message.prefix(160))
         remoteCarModelErrorMessages[ownerID] = safeMessage
+        if activeRemoteCarModelLoads[ownerID] == id {
+            activeRemoteCarModelLoads.removeValue(forKey: ownerID)
+            startNextRemoteCarModelLoadIfNeeded()
+        }
         if role == .host {
-            clearStoredModel(for: ownerID)
+            if clearCurrentModel { clearStoredModel(for: ownerID) }
             invalidateAllReady()
             broadcastRoster()
             if let ownerContext = context(for: ownerID) {
@@ -1521,6 +1912,7 @@ final class PeerRaceSession {
     private func clearStoredModel(for playerID: UUID) {
         storedCarModels.removeValue(forKey: playerID)
         modelAcknowledgements.removeValue(forKey: playerID)
+        removeRemoteCarModelLoads(for: playerID)
         if playerID == localPlayerID {
             localCarModelTransferID = nil
         }
@@ -1596,33 +1988,63 @@ final class PeerRaceSession {
         onResetRace?()
     }
 
-    private func recordFinish(playerID: UUID, raceTime: TimeInterval) {
+    private func recordFinish(
+        playerID: UUID,
+        roundID: UUID,
+        raceTime: TimeInterval,
+        hostFinishTime: TimeInterval
+    ) {
         guard role == .host, raceInProgress,
+              roundID == currentRoundID,
               participant(id: playerID) != nil,
-              !finishOrder.contains(playerID),
-              raceTime.isFinite, raceTime >= 0 else { return }
-        finishOrder.append(playerID)
-        let position = finishOrder.count
-        if playerID == localPlayerID {
-            onFinishResult?(position, raceTime)
-        } else if let context = context(for: playerID) {
-            _ = send(
-                .finishResult(
-                    playerID: playerID,
-                    position: position,
-                    raceTime: raceTime
-                ),
-                to: context
-            )
-        }
+              finishRecords[playerID] == nil,
+              raceTime.isFinite, raceTime >= 0,
+              hostFinishTime.isFinite,
+              let hostStartTime = scheduledHostStartTime,
+              hostFinishTime >= hostStartTime else { return }
+        finishRecords[playerID] = PeerFinishRecord(
+            raceTime: raceTime,
+            hostFinishTime: hostFinishTime
+        )
         completeRaceIfNeeded()
     }
 
     private func completeRaceIfNeeded() {
         guard role == .host, raceInProgress, !raceComplete else { return }
         let currentIDs = Set(participants.map(\.id))
-        guard currentIDs.isSubset(of: Set(finishOrder)) else { return }
+        guard currentIDs.isSubset(of: Set(finishRecords.keys)),
+              let roundID = currentRoundID else { return }
+        finishOrder = currentIDs.sorted { lhs, rhs in
+            guard let lhsRecord = finishRecords[lhs],
+                  let rhsRecord = finishRecords[rhs] else {
+                return lhs.uuidString < rhs.uuidString
+            }
+            // RaceGame reports the finish-line crossing time interpolated
+            // within its fixed simulation step. Using callback wall time here
+            // would reintroduce render-frame and device-hitch bias.
+            if lhsRecord.raceTime != rhsRecord.raceTime {
+                return lhsRecord.raceTime < rhsRecord.raceTime
+            }
+            return lhs.uuidString < rhs.uuidString
+        }
         raceComplete = true
+        for (offset, playerID) in finishOrder.enumerated() {
+            guard let record = finishRecords[playerID] else { continue }
+            let position = offset + 1
+            if playerID == localPlayerID {
+                onFinishResult?(position, record.raceTime)
+            } else if let context = context(for: playerID) {
+                _ = send(
+                    .finishResult(
+                        playerID: playerID,
+                        roundID: roundID,
+                        position: position,
+                        raceTime: record.raceTime
+                    ),
+                    to: context
+                )
+            }
+        }
         broadcast(.raceComplete)
     }
 
@@ -1691,11 +2113,16 @@ final class PeerRaceSession {
 
     private func resetFinishState() {
         finishOrder.removeAll()
+        finishRecords.removeAll()
         raceComplete = false
         snapshotAccumulator = 0
     }
 
     private func resetRoundState() {
+        scheduledRaceStartTask?.cancel()
+        scheduledRaceStartTask = nil
+        currentRoundID = nil
+        scheduledHostStartTime = nil
         for index in participants.indices { participants[index].isReady = false }
         resetFinishState()
     }
@@ -1722,5 +2149,10 @@ final class PeerRaceSession {
         localCarModelTransferID = nil
         localImportedCarAcknowledged = localCarChoice != .imported
         localCarModelErrorMessage = nil
+        activeRemoteCarModelLoads.removeAll()
+        pendingRemoteCarModelLoads.removeAll()
+        remoteCarModelBudgets.removeAll()
+        remoteCarModelSessionBytes = 0
+        remoteCarModelViolationCount = 0
     }
 }

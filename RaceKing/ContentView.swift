@@ -22,7 +22,9 @@ struct ContentView: View {
     @State private var tilt = TiltSteering()
     @State private var multiplayer = PeerRaceSession()
     @State private var peerCourse = PeerCourseCoordinator()
+    @State private var remoteCarModelLoader = RemoteCarModelLoader()
     @State private var arSession = ARSession()
+    @State private var arSessionMonitor = ARSessionMonitor()
     @State private var spatialTrackingSession = SpatialTrackingSession()
     @State private var cameraAccessDenied = false
     @State private var showingRoomScan = false
@@ -40,6 +42,9 @@ struct ContentView: View {
     @State private var realityViewSize = CGSize.zero
     @State private var updateSubscription: EventSubscription?
     @State private var screen: AppScreen = .title
+    @State private var arTrackingMessage: String?
+    @State private var arCameraTrackingNormal = false
+    @State private var appNotice: String?
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
@@ -55,16 +60,34 @@ struct ContentView: View {
                     game: game,
                     multiplayer: multiplayer,
                     canScanRoom: canScanRoom,
+                    roomScanUnavailableMessage: roomScanUnavailableMessage,
                     onScanRoom: startRoomScan,
                     onResetCoursePlacement: resetCoursePlacement,
+                    onPlaceAtCenter: placeAtCenterAction,
+                    onRotateCourseLeft: rotateCourseLeftAction,
+                    onRotateCourseRight: rotateCourseRightAction,
+                    onScaleCourseDown: scaleCourseDownAction,
+                    onScaleCourseUp: scaleCourseUpAction,
                     onChooseMode: returnToModeSelection,
                     onReturnToTitle: returnToTitle
                 )
 
                 if cameraAccessDenied && !game.virtualModeActive {
                     CameraDeniedView(
-                        allowsPlayWithoutAR: game.mode != .peerRace,
-                        onPlayWithoutAR: { game.activateVirtualMode() },
+                        allowsPlayWithoutAR: game.mode != .peerRace
+                            && game.mode != .roomDrive,
+                        requiresRoomScanning: game.mode == .roomDrive,
+                        onPlayWithoutAR: activateVirtualModeAfterTrackingFailure,
+                        onChooseMode: returnToModeSelection
+                    )
+                } else if let arTrackingMessage,
+                          !game.virtualModeActive {
+                    ARRecoveryView(
+                        message: arTrackingMessage,
+                        allowsPlayWithoutAR: game.mode != .peerRace
+                            && game.mode != .roomDrive,
+                        onRetry: retryARTracking,
+                        onPlayWithoutAR: activateVirtualModeAfterTrackingFailure,
                         onChooseMode: returnToModeSelection
                     )
                 }
@@ -92,6 +115,8 @@ struct ContentView: View {
                 haptics.handle(event)
             }
             configureMultiplayer()
+            configureARSessionMonitoring()
+            await loadPersistedCarModels()
         }
         .onChange(of: game.tiltSteeringEnabled) {
             guard screen == .game else { return }
@@ -128,11 +153,31 @@ struct ContentView: View {
         .onChange(of: scenePhase) {
             if screen == .game, scenePhase == .active {
                 refreshCameraAuthorization()
-                requestSpatialTracking()
+                updateTiltSteering()
+                if game.virtualModeActive {
+                    game.resumeSoloRace(for: .appInactive)
+                    game.resumeSoloRace(for: .arRecovery)
+                } else {
+                    _ = game.suspendSoloRace(for: .arRecovery)
+                    game.resumeSoloRace(for: .appInactive)
+                    requestSpatialTracking()
+                    #if targetEnvironment(simulator)
+                    game.resumeSoloRace(for: .arRecovery)
+                    #endif
+                }
             } else if scenePhase != .active {
-                if screen == .game, scenePhase == .background,
-                   game.mode == .peerRace {
-                    multiplayer.disconnect()
+                if screen == .game {
+                    tilt.stop()
+                    if game.mode == .peerRace {
+                        if multiplayer.state != .idle {
+                            appNotice = "アプリがバックグラウンドへ移動したため、ネットワーク対戦から退出しました。"
+                        }
+                        multiplayer.disconnect()
+                    } else {
+                        _ = game.suspendSoloRace(for: .appInactive)
+                    }
+                    clearDrivingInput()
+                    audio.setEngine(speedRatio: 0, running: false)
                 }
                 if !showingRoomScan {
                     arSession.pause()
@@ -160,15 +205,20 @@ struct ContentView: View {
             )
         }
         .alert(
-            "部屋をスキャンできませんでした",
+            roomScanError == nil ? "お知らせ" : "部屋をスキャンできませんでした",
             isPresented: Binding(
-                get: { roomScanError != nil },
-                set: { if !$0 { roomScanError = nil } }
+                get: { roomScanError != nil || appNotice != nil },
+                set: {
+                    if !$0 {
+                        roomScanError = nil
+                        appNotice = nil
+                    }
+                }
             )
         ) {
             Button("OK", role: .cancel) {}
         } message: {
-            Text(roomScanError ?? "")
+            Text(roomScanError ?? appNotice ?? "")
         }
     }
 
@@ -195,6 +245,7 @@ struct ContentView: View {
             updateSubscription = content.subscribe(to: SceneEvents.Update.self) { event in
                 guard screen == .game else { return }
                 game.update(deltaTime: event.deltaTime)
+                completeARRecoveryIfReady()
                 if game.mode == .peerRace {
                     multiplayer.sendCarState(
                         game.peerCarState(), deltaTime: event.deltaTime
@@ -261,6 +312,7 @@ struct ContentView: View {
         if multiplayer.state != .idle {
             multiplayer.disconnect()
         }
+        clearARRecoveryState()
         let reusesCoursePlacement = game.mode.reusesLocalCoursePlacement
             && mode.reusesLocalCoursePlacement
             && game.hasReusableCoursePlacement
@@ -312,11 +364,11 @@ struct ContentView: View {
 
     /// Stops gameplay and AR services before returning to a menu.
     private func leaveGame(for destination: AppScreen) {
+        remoteCarModelLoader.cancelAll()
         multiplayer.disconnect()
         tilt.stop()
-        game.steeringInput = 0
-        game.throttleInput = false
-        game.brakeInput = false
+        clearDrivingInput()
+        clearARRecoveryState()
         if game.phase != .ready {
             game.reset()
         }
@@ -365,23 +417,20 @@ struct ContentView: View {
             )
         }
         multiplayer.onRemoteImportedCarModel = {
-            [weak game, weak multiplayer] playerID, data, flipped, id in
-            let temporaryURL = FileManager.default.temporaryDirectory
-                .appending(
-                    path: "RaceKing-PeerCar-\(playerID.uuidString)-\(id.uuidString).usdz"
-                )
-            Task {
-                defer { try? FileManager.default.removeItem(at: temporaryURL) }
-                do {
-                    try data.write(to: temporaryURL, options: .atomic)
-                    let template = try await Entity(contentsOf: temporaryURL)
-                    guard let game, let multiplayer,
-                          multiplayer.isCurrentRemoteImportedCarModel(
-                            playerID: playerID,
-                            id: id
-                          ) else {
-                        return
-                    }
+            [weak game, weak multiplayer, weak remoteCarModelLoader]
+            playerID, data, flipped, id in
+            remoteCarModelLoader?.enqueue(
+                playerID: playerID,
+                modelID: id,
+                data: data,
+                isCurrent: {
+                    multiplayer?.isCurrentRemoteImportedCarModel(
+                        playerID: playerID,
+                        id: id
+                    ) == true
+                },
+                onLoaded: { template in
+                    guard let game, let multiplayer else { return }
                     game.setPeerRaceRemoteImportedCar(
                         playerID: playerID,
                         template: template,
@@ -391,21 +440,16 @@ struct ContentView: View {
                         playerID: playerID,
                         id: id
                     )
-                } catch {
-                    guard let multiplayer,
-                          multiplayer.isCurrentRemoteImportedCarModel(
-                            playerID: playerID,
-                            id: id
-                          ) else {
-                        return
-                    }
+                },
+                onFailure: { message in
+                    guard let multiplayer else { return }
                     multiplayer.failRemoteImportedCarModel(
                         playerID: playerID,
                         id: id,
-                        message: "カスタム車を読み込めませんでした: \(error.localizedDescription)"
+                        message: "カスタム車を読み込めませんでした: \(message)"
                     )
                 }
-            }
+            )
         }
         multiplayer.onFinishResult = { [weak game] position, raceTime in
             game?.finishPeerRace(position: position, raceTime: raceTime)
@@ -414,6 +458,9 @@ struct ContentView: View {
             if !connected, let game,
                game.mode == .peerRace, game.phase != .ready {
                 game.reset()
+            }
+            if !connected {
+                remoteCarModelLoader.cancelAll()
             }
             peerCourse?.connectionChanged(connected)
         }
@@ -425,6 +472,188 @@ struct ContentView: View {
             multiplayer.participants,
             localPlayerID: multiplayer.localPlayerID
         )
+    }
+
+    private func configureARSessionMonitoring() {
+        #if !targetEnvironment(simulator)
+        arSession.delegate = arSessionMonitor
+        arSessionMonitor.onInterrupted = {
+            guard screen == .game, scenePhase == .active,
+                  !game.virtualModeActive else { return }
+            clearDrivingInput()
+            arCameraTrackingNormal = false
+            audio.setEngine(speedRatio: 0, running: false)
+            if game.mode == .peerRace {
+                multiplayer.disconnect()
+                if game.phase != .ready { game.reset() }
+                appNotice = "ARが中断されたため、ネットワーク対戦から退出しました。"
+            } else {
+                _ = game.suspendSoloRace(for: .arRecovery)
+            }
+            arTrackingMessage = "ARが中断されました。カメラを再開しています…"
+        }
+        arSessionMonitor.onInterruptionEnded = {
+            guard screen == .game, scenePhase == .active,
+                  !game.virtualModeActive else { return }
+            arTrackingMessage = "周囲を映してコース位置を復元してください…"
+            arCameraTrackingNormal = false
+            isSpatialTrackingSessionRunning = false
+            requestSpatialTrackingStop()
+            requestSpatialTracking()
+        }
+        arSessionMonitor.onFailure = { message in
+            guard screen == .game, !game.virtualModeActive else { return }
+            isSpatialTrackingSessionRunning = false
+            arCameraTrackingNormal = false
+            clearDrivingInput()
+            audio.setEngine(speedRatio: 0, running: false)
+            if game.mode == .peerRace {
+                multiplayer.disconnect()
+                if game.phase != .ready { game.reset() }
+            } else {
+                _ = game.suspendSoloRace(for: .arRecovery)
+            }
+            if game.mode == .roomDrive {
+                if game.phase != .ready { game.reset() }
+                game.clearRoomDriveSetup()
+                appNotice = "ARの位置を復元できなかったため、部屋をもう一度スキャンしてください。"
+            }
+            requestSpatialTrackingStop()
+            arTrackingMessage = "ARを継続できませんでした。\n\(message)"
+        }
+        arSessionMonitor.onTrackingNormal = {
+            guard screen == .game, scenePhase == .active,
+                  !game.virtualModeActive else { return }
+            arCameraTrackingNormal = true
+            completeARRecoveryIfReady()
+        }
+        arSessionMonitor.onTrackingLimited = { message in
+            guard screen == .game, scenePhase == .active,
+                  !game.virtualModeActive else { return }
+            arCameraTrackingNormal = false
+            _ = game.suspendSoloRace(for: .arRecovery)
+            clearDrivingInput()
+            audio.setEngine(speedRatio: 0, running: false)
+            // Initial placement intentionally has no anchor yet. Keep the
+            // placement controls interactive instead of covering them with
+            // the full-screen recovery view.
+            if game.phase == .ready,
+               game.mode != .roomDrive,
+               !game.isCoursePlaced {
+                arTrackingMessage = nil
+            } else {
+                arTrackingMessage = message
+            }
+        }
+        #endif
+    }
+
+    /// Loads persisted imports one at a time after the first frame. Invalid
+    /// files are removed so they cannot create a repeat-launch crash loop.
+    private func loadPersistedCarModels() async {
+        var discardedModel = false
+        let playerURL = EntityFactory.importedCarURL
+        do {
+            if let template = try await loadPersistedCarModel(at: playerURL) {
+                guard !Task.isCancelled else { return }
+                EntityFactory.customCarTemplate = template
+                game.setCustomCarModel(template)
+                multiplayer.refreshLocalImportedCar()
+            }
+        } catch {
+            discardedModel = true
+        }
+
+        for index in 0..<EntityFactory.aiCarCount {
+            let url = EntityFactory.importedAICarURL(index: index)
+            do {
+                guard let template = try await loadPersistedCarModel(at: url) else {
+                    continue
+                }
+                guard !Task.isCancelled else { return }
+                EntityFactory.aiCarTemplates[index] = template
+                game.setAICarModel(template, at: index)
+            } catch {
+                discardedModel = true
+            }
+        }
+        if discardedModel {
+            multiplayer.refreshLocalImportedCar()
+            appNotice = "安全に読み込めない保存済み車モデルを削除し、標準モデルへ戻しました。"
+        }
+    }
+
+    private func loadPersistedCarModel(at url: URL) async throws -> Entity? {
+        let manager = FileManager.default
+        let loadingURL = EntityFactory.loadingURL(for: url)
+        // A leftover loading file means RealityKit did not complete the prior
+        // parse. Never feed it to the parser again.
+        try? manager.removeItem(at: loadingURL)
+        guard manager.fileExists(atPath: url.path) else { return nil }
+
+        try manager.moveItem(at: url, to: loadingURL)
+        do {
+            try EntityFactory.validateImportedCar(at: loadingURL)
+            let template = try await Entity(contentsOf: loadingURL)
+            guard !Task.isCancelled else {
+                try? manager.removeItem(at: loadingURL)
+                return nil
+            }
+            try EntityFactory.commitImportedCar(
+                from: loadingURL,
+                to: url
+            )
+            return template
+        } catch {
+            try? manager.removeItem(at: loadingURL)
+            throw error
+        }
+    }
+
+    private func clearDrivingInput() {
+        game.steeringInput = 0
+        game.throttleInput = false
+        game.brakeInput = false
+    }
+
+    private func clearARRecoveryState() {
+        arTrackingMessage = nil
+        arCameraTrackingNormal = false
+        game.resumeSoloRace(for: .arRecovery)
+    }
+
+    private func retryARTracking() {
+        guard scenePhase == .active else { return }
+        arCameraTrackingNormal = false
+        _ = game.suspendSoloRace(for: .arRecovery)
+        arTrackingMessage = "周囲を映してコース位置を復元してください…"
+        isSpatialTrackingSessionRunning = false
+        requestSpatialTracking()
+    }
+
+    private func activateVirtualModeAfterTrackingFailure() {
+        arTrackingMessage = nil
+        arCameraTrackingNormal = false
+        game.activateVirtualMode()
+        game.resumeSoloRace(for: .arRecovery)
+        game.resumeSoloRace(for: .appInactive)
+    }
+
+    private func completeARRecoveryIfReady() {
+        guard arCameraTrackingNormal,
+              screen == .game,
+              scenePhase == .active,
+              !game.virtualModeActive else { return }
+        // A fresh placement has no anchor by design. Only an already placed
+        // course can be waiting for its RealityKit anchor to reconnect.
+        guard game.mode == .roomDrive
+                || !game.isCoursePlaced
+                || game.isCourseAnchored else {
+            arTrackingMessage = "コース位置を復元しています。元の床やテーブルを映してください…"
+            return
+        }
+        arTrackingMessage = nil
+        game.resumeSoloRace(for: .arRecovery)
     }
 
     private var roomPlanSupported: Bool {
@@ -449,6 +678,19 @@ struct ContentView: View {
             && !cameraAccessDenied
             && !isPreparingRoomScan
             && !isConfiguringSpatialTracking
+    }
+
+    private var roomScanUnavailableMessage: String? {
+        if !roomPlanSupported {
+            return "部屋のスキャンにはLiDAR対応端末が必要です。"
+        }
+        if cameraAccessDenied {
+            return "部屋のスキャンにはカメラの許可が必要です。"
+        }
+        if game.virtualModeActive {
+            return "部屋のスキャンはARなしモードでは利用できません。"
+        }
+        return nil
     }
 
     private func refreshCameraAuthorization() {
@@ -583,6 +825,9 @@ struct ContentView: View {
         // Stopping SpatialTrackingSession is enough to rebuild RealityKit's
         // plane provider at a mode boundary. Resetting the ARSession here can
         // race camera capture startup and leave VIO permanently uninitialized.
+        // RoomPlan may temporarily install its own delegate on the shared
+        // session, so restore lifecycle monitoring before resuming gameplay.
+        arSession.delegate = arSessionMonitor
         arSession.run(arConfiguration)
         if shouldInstallRoomWorldAnchorOnNextRun {
             if game.mode == .roomDrive { game.installRoomWorldAnchor() }
@@ -746,6 +991,63 @@ struct ContentView: View {
         return multiplayer.canEditHostCourse
     }
 
+    private var placeAtCenterAction: (() -> Void)? {
+        #if targetEnvironment(simulator)
+        nil
+        #else
+        { placeCourse(at: CGPoint(
+            x: realityViewSize.width / 2,
+            y: realityViewSize.height / 2
+        )) }
+        #endif
+    }
+
+    private var rotateCourseLeftAction: (() -> Void)? {
+        #if targetEnvironment(simulator)
+        nil
+        #else
+        { adjustCourseRotation(by: -.pi / 12) }
+        #endif
+    }
+
+    private var rotateCourseRightAction: (() -> Void)? {
+        #if targetEnvironment(simulator)
+        nil
+        #else
+        { adjustCourseRotation(by: .pi / 12) }
+        #endif
+    }
+
+    private var scaleCourseDownAction: (() -> Void)? {
+        #if targetEnvironment(simulator)
+        nil
+        #else
+        { adjustCourseScale(by: 0.9) }
+        #endif
+    }
+
+    private var scaleCourseUpAction: (() -> Void)? {
+        #if targetEnvironment(simulator)
+        nil
+        #else
+        { adjustCourseScale(by: 1.1) }
+        #endif
+    }
+
+    private func adjustCourseRotation(by amount: Float) {
+        guard game.phase == .ready, game.mode != .roomDrive,
+              game.isCoursePlaced, !game.virtualModeActive,
+              canEditCoursePlacement else { return }
+        game.setCourseRotation(game.courseRotation + amount)
+    }
+
+    private func adjustCourseScale(by factor: Float) {
+        guard game.phase == .ready, game.mode != .roomDrive,
+              game.isCoursePlaced, !game.virtualModeActive,
+              canEditCoursePlacement else { return }
+        game.setCourseScale(game.courseScale * factor)
+    }
+
     /// Clears an editable course placement; the next valid surface tap creates it.
     private func resetCoursePlacement() {
         let canResetPeerPlacement = game.mode == .peerRace
@@ -758,16 +1060,38 @@ struct ContentView: View {
         courseDragOffset = nil
         courseScaleAtPinchStart = nil
         courseRotationAtGestureStart = nil
+        arTrackingMessage = nil
+        game.resumeSoloRace(for: .arRecovery)
         game.prepareCourseSurfacePlacement()
     }
 
     private func updateTiltSteering() {
         if game.tiltSteeringEnabled {
-            tilt.start { game.steeringInput = $0 }
+            let started = tilt.start(
+                orientation: { currentInterfaceOrientation },
+                onSteer: { game.steeringInput = $0 },
+                onUnavailable: {
+                    game.steeringInput = 0
+                    if game.tiltSteeringEnabled {
+                        game.tiltSteeringEnabled = false
+                        appNotice = "傾きセンサーを利用できないため、タッチ操作へ戻しました。"
+                    }
+                }
+            )
+            if !started {
+                game.steeringInput = 0
+            }
         } else {
             tilt.stop()
             game.steeringInput = 0
         }
+    }
+
+    private var currentInterfaceOrientation: UIInterfaceOrientation {
+        UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .first(where: { $0.activationState == .foregroundActive })?
+            .effectiveGeometry.interfaceOrientation ?? .portrait
     }
 }
 
@@ -775,58 +1099,105 @@ struct ContentView: View {
 /// camera, while network play must return to an AR-capable state.
 private struct CameraDeniedView: View {
     var allowsPlayWithoutAR = true
+    var requiresRoomScanning = false
     var onPlayWithoutAR: () -> Void
     var onChooseMode: () -> Void = {}
 
     var body: some View {
-        VStack(spacing: 14) {
-            Image(systemName: "camera.fill")
-                .font(.largeTitle)
-            Text("カメラへのアクセスが必要です")
-                .font(.headline.weight(.black))
-            Text(
-                allowsPlayWithoutAR
-                    ? "AR表示と部屋のスキャンにカメラを使用します。\n設定アプリで許可してください。"
-                    : "ネットワーク対戦にはカメラとARが必要です。\n設定アプリで許可してください。"
-            )
-                .font(.callout)
-                .multilineTextAlignment(.center)
-            Button {
-                if let url = URL(string: UIApplication.openSettingsURLString) {
-                    UIApplication.shared.open(url)
-                }
-            } label: {
-                Text("設定を開く")
+        ScrollView {
+            VStack(spacing: 14) {
+                Image(systemName: "camera.fill")
+                    .font(.largeTitle)
+                    .accessibilityHidden(true)
+                Text("カメラへのアクセスが必要です")
                     .font(.headline.bold())
-                    .padding(.horizontal, 24)
-                    .padding(.vertical, 10)
-                    .background(.red.gradient, in: Capsule())
-            }
-            .buttonStyle(.plain)
-            if allowsPlayWithoutAR {
+                Text(cameraMessage)
+                    .font(.callout)
+                    .multilineTextAlignment(.center)
                 Button {
-                    onPlayWithoutAR()
+                    if let url = URL(string: UIApplication.openSettingsURLString) {
+                        UIApplication.shared.open(url)
+                    }
                 } label: {
-                    Text("ARなしで遊ぶ")
+                    Text("設定を開く")
                         .font(.headline.bold())
                         .padding(.horizontal, 24)
                         .padding(.vertical, 10)
-                        .background(.blue.gradient, in: Capsule())
+                        .background(.red.gradient, in: Capsule())
                 }
                 .buttonStyle(.plain)
-            } else {
-                Button(action: onChooseMode) {
-                    Label("モード選択に戻る", systemImage: "chevron.left")
-                        .font(.headline.bold())
+                if allowsPlayWithoutAR {
+                    Button {
+                        onPlayWithoutAR()
+                    } label: {
+                        Text("ARなしのタイムアタックで遊ぶ")
+                            .font(.headline.bold())
+                            .padding(.horizontal, 24)
+                            .padding(.vertical, 10)
+                            .background(.blue.gradient, in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                } else {
+                    Button(action: onChooseMode) {
+                        Label("モード選択に戻る", systemImage: "chevron.left")
+                            .font(.headline.bold())
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(.white)
                 }
-                .buttonStyle(.bordered)
-                .tint(.white)
             }
+            .foregroundStyle(.white)
+            .padding(26)
+            .background(.black.opacity(0.8), in: RoundedRectangle(cornerRadius: 20))
+            .padding()
         }
-        .foregroundStyle(.white)
-        .padding(26)
-        .background(.black.opacity(0.8), in: RoundedRectangle(cornerRadius: 20))
-        .padding()
+        .scrollBounceBehavior(.basedOnSize)
+    }
+
+    private var cameraMessage: String {
+        if requiresRoomScanning {
+            return "フリー走行の部屋スキャンにはカメラとARが必要です。\n設定アプリで許可してください。"
+        }
+        if allowsPlayWithoutAR {
+            return "AR表示にカメラを使用します。\n許可するか、ARなしのタイムアタックへ切り替えてください。"
+        }
+        return "ネットワーク対戦にはカメラとARが必要です。\n設定アプリで許可してください。"
+    }
+}
+
+private struct ARRecoveryView: View {
+    let message: String
+    var allowsPlayWithoutAR = false
+    var onRetry: () -> Void
+    var onPlayWithoutAR: () -> Void
+    var onChooseMode: () -> Void
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 14) {
+                ProgressView()
+                    .controlSize(.large)
+                    .tint(.white)
+                Text("ARを再調整しています")
+                    .font(.headline.weight(.black))
+                Text(message)
+                    .font(.callout)
+                    .multilineTextAlignment(.center)
+                Button("再試行", action: onRetry)
+                    .buttonStyle(.borderedProminent)
+                if allowsPlayWithoutAR {
+                    Button("ARなしのタイムアタックへ切り替える", action: onPlayWithoutAR)
+                        .buttonStyle(.bordered)
+                }
+                Button("モード選択に戻る", action: onChooseMode)
+                    .buttonStyle(.bordered)
+            }
+            .foregroundStyle(.white)
+            .padding(26)
+            .background(.black.opacity(0.82), in: RoundedRectangle(cornerRadius: 20))
+            .padding()
+        }
+        .scrollBounceBehavior(.basedOnSize)
     }
 }
 

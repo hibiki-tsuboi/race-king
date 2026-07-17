@@ -94,6 +94,11 @@ struct CarPhysics {
         return level
     }
 
+    /// Cancels an already-fired mini-turbo without changing the car's momentum.
+    mutating func cancelBoost() {
+        boostTimer = 0
+    }
+
     /// Integrates one step and returns the movement delta.
     mutating func step(
         dt: Float, steeringInput: Float, throttle: Bool, brake: Bool,
@@ -114,7 +119,13 @@ struct CarPhysics {
         }
         if throttle { speed += Self.acceleration * dt }
         if brake {
-            speed -= (speed > 0 ? Self.brakeDeceleration : Self.reverseAcceleration) * dt
+            if speed > 0 {
+                // Braking may reach a standstill, but never crosses through it
+                // in one integration step. A subsequent held step starts reverse.
+                speed = max(0, speed - Self.brakeDeceleration * dt)
+            } else {
+                speed -= Self.reverseAcceleration * dt
+            }
         }
 
         // The road has grip; leaving it slows the car down hard, and a
@@ -143,6 +154,8 @@ struct CarPhysics {
             // The nose rotates ahead by the growing slip angle while the
             // travel direction follows the steered arc, so kicking the tail
             // out doesn't push the car wide at corner entry.
+            // Cars face +Z, so a right turn is a negative yaw around +Y.
+            // Positive steering still means right to every input source.
             heading -= driftDirection
                 * (3.8 * grip * (0.45 + 0.55 * inward) * dt + (newSlip - slip))
             slip = newSlip

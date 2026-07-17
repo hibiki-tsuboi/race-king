@@ -145,6 +145,29 @@ struct TrackLayout {
         }
     }
 
+    /// Returns where a forward movement segment crosses the visible finish line.
+    /// The fraction is measured from `previous` (0) to `current` (1).
+    func finishLineCrossingFraction(
+        from previous: SIMD3<Float>, to current: SIMD3<Float>
+    ) -> Float? {
+        let finish = sample(at: startOffset)
+        let previousDistance = simd_dot(previous - finish.position, finish.tangent)
+        let currentDistance = simd_dot(current - finish.position, finish.tangent)
+        let forwardDistance = currentDistance - previousDistance
+
+        // A lap only counts in the course direction. Requiring a true side
+        // change also prevents a stationary car on the line from retriggering.
+        guard previousDistance <= 0, currentDistance > 0,
+              forwardDistance > 1e-6 else { return nil }
+
+        let fraction = max(0, min(1, -previousDistance / forwardDistance))
+        let intersection = previous + (current - previous) * fraction
+        let lateral = SIMD3<Float>(-finish.tangent.z, 0, finish.tangent.x)
+        let lateralDistance = abs(simd_dot(intersection - finish.position, lateral))
+        guard lateralDistance <= roadWidth / 2 + 1e-4 else { return nil }
+        return fraction
+    }
+
     /// Yaw angle (around +Y) that orients an entity's +Z axis along the tangent.
     static func heading(of tangent: SIMD3<Float>) -> Float {
         atan2(tangent.x, tangent.z)

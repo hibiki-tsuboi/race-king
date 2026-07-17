@@ -4,6 +4,7 @@
 //
 
 import Foundation
+import ImageIO
 import RealityKit
 #if canImport(UIKit)
 import UIKit
@@ -14,6 +15,28 @@ import AppKit
 /// Builds the visual entities for the game. All models face +Z as "forward".
 enum EntityFactory {
     static let aiCarCount = 4
+    /// Compressed USDZ size budget shared by local import and nearby transfer.
+    nonisolated static let maximumImportedCarBytes = 12 * 1_024 * 1_024
+
+    enum ImportedCarError: LocalizedError {
+        case notRegularFile
+        case emptyFile
+        case fileTooLarge
+        case invalidUSDZ
+
+        var errorDescription: String? {
+            switch self {
+            case .notRegularFile:
+                "通常のUSDZファイルを選択してください。"
+            case .emptyFile:
+                "空のファイルは読み込めません。"
+            case .fileTooLarge:
+                "車モデルは12MB以下にしてください。"
+            case .invalidUSDZ:
+                "有効なUSDZファイルではありません。"
+            }
+        }
+    }
 
     /// A circuit made of flat road segments, alternating red/white curbs,
     /// and a checkered start/finish line.
@@ -110,12 +133,177 @@ enum EntityFactory {
         supportDirectory.appending(path: "AICar\(index + 1).usdz")
     }
 
-    /// Custom model for the player and ghost cars. An imported file wins
-    /// over a bundled `PlayerCar.usdz`; nil falls back to the procedural kart.
-    static var customCarTemplate: Entity? = {
-        if let imported = try? Entity.load(contentsOf: importedCarURL) { return imported }
-        return try? Entity.load(named: "PlayerCar")
-    }()
+    /// Creates a sibling staging URL so a validated import can atomically
+    /// replace the previous known-good file without crossing volumes.
+    static func stagingURL(for destination: URL) -> URL {
+        destination.deletingLastPathComponent().appending(
+            path: ".\(destination.deletingPathExtension().lastPathComponent).\(UUID().uuidString).usdz"
+        )
+    }
+
+    /// Fixed crash-recovery location used while loading a persisted model.
+    /// A file left here means the prior parse did not finish and is discarded
+    /// on the next launch instead of being retried in a boot loop.
+    static func loadingURL(for destination: URL) -> URL {
+        destination.deletingLastPathComponent().appending(
+            path: ".\(destination.deletingPathExtension().lastPathComponent).loading.usdz"
+        )
+    }
+
+    /// Rejects oversized/non-USDZ input before RealityKit expands it.
+    nonisolated static func validateImportedCar(at url: URL) throws {
+        let values = try url.resourceValues(forKeys: [
+            .isRegularFileKey, .fileSizeKey,
+        ])
+        guard values.isRegularFile == true else {
+            throw ImportedCarError.notRegularFile
+        }
+        guard let size = values.fileSize, size > 0 else {
+            throw ImportedCarError.emptyFile
+        }
+        guard size <= maximumImportedCarBytes else {
+            throw ImportedCarError.fileTooLarge
+        }
+        try validateImportedCar(data: Data(contentsOf: url, options: .mappedIfSafe))
+    }
+
+    nonisolated static func validateImportedCar(data: Data) throws {
+        guard !data.isEmpty else { throw ImportedCarError.emptyFile }
+        guard data.count <= maximumImportedCarBytes else {
+            throw ImportedCarError.fileTooLarge
+        }
+        guard data.starts(with: [0x50, 0x4b, 0x03, 0x04]) else {
+            throw ImportedCarError.invalidUSDZ
+        }
+
+        var offset = 0
+        var entryCount = 0
+        var foundUSDScene = false
+        var totalTexturePixels = 0
+        while offset + 4 <= data.count {
+            let signature = littleEndianUInt32(in: data, at: offset)
+            if signature == 0x0201_4b50 || signature == 0x0605_4b50 {
+                break
+            }
+            guard signature == 0x0403_4b50, offset + 30 <= data.count else {
+                throw ImportedCarError.invalidUSDZ
+            }
+
+            let flags = littleEndianUInt16(in: data, at: offset + 6)
+            let compression = littleEndianUInt16(in: data, at: offset + 8)
+            let compressedSize = Int(littleEndianUInt32(in: data, at: offset + 18))
+            let uncompressedSize = Int(littleEndianUInt32(in: data, at: offset + 22))
+            let nameLength = Int(littleEndianUInt16(in: data, at: offset + 26))
+            let extraLength = Int(littleEndianUInt16(in: data, at: offset + 28))
+            let nameStart = offset + 30
+            let contentStart = nameStart + nameLength + extraLength
+            guard flags & 0x08 == 0,
+                  compression == 0,
+                  compressedSize == uncompressedSize,
+                  compressedSize >= 0,
+                  contentStart >= nameStart,
+                  contentStart <= data.count,
+                  compressedSize <= data.count - contentStart else {
+                throw ImportedCarError.invalidUSDZ
+            }
+
+            let nameData = data[nameStart..<(nameStart + nameLength)]
+            guard let name = String(data: nameData, encoding: .utf8),
+                  !name.hasPrefix("/"),
+                  !name.split(separator: "/").contains("..") else {
+                throw ImportedCarError.invalidUSDZ
+            }
+            let lowercasedName = name.lowercased()
+            if lowercasedName.hasSuffix(".usd")
+                || lowercasedName.hasSuffix(".usda")
+                || lowercasedName.hasSuffix(".usdc") {
+                foundUSDScene = true
+            }
+            if isRasterTexture(lowercasedName) {
+                let textureData = Data(
+                    data[contentStart..<(contentStart + compressedSize)]
+                )
+                totalTexturePixels += try validatedTexturePixelCount(textureData)
+                guard totalTexturePixels <= 32_000_000 else {
+                    throw ImportedCarError.invalidUSDZ
+                }
+            }
+            entryCount += 1
+            guard entryCount <= 256 else {
+                throw ImportedCarError.invalidUSDZ
+            }
+            offset = contentStart + compressedSize
+        }
+        guard entryCount > 0, foundUSDScene else {
+            throw ImportedCarError.invalidUSDZ
+        }
+    }
+
+    nonisolated private static func littleEndianUInt16(
+        in data: Data, at offset: Int
+    ) -> UInt16 {
+        let start = data.startIndex + offset
+        return UInt16(data[start]) | UInt16(data[start + 1]) << 8
+    }
+
+    nonisolated private static func littleEndianUInt32(
+        in data: Data, at offset: Int
+    ) -> UInt32 {
+        let start = data.startIndex + offset
+        return UInt32(data[start])
+            | UInt32(data[start + 1]) << 8
+            | UInt32(data[start + 2]) << 16
+            | UInt32(data[start + 3]) << 24
+    }
+
+    nonisolated private static func isRasterTexture(_ name: String) -> Bool {
+        [".png", ".jpg", ".jpeg", ".heic", ".tif", ".tiff"]
+            .contains { name.hasSuffix($0) }
+    }
+
+    nonisolated private static func validatedTexturePixelCount(
+        _ data: Data
+    ) throws -> Int {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(
+                source, 0, nil
+              ) as? [CFString: Any],
+              let width = properties[kCGImagePropertyPixelWidth] as? NSNumber,
+              let height = properties[kCGImagePropertyPixelHeight] as? NSNumber else {
+            throw ImportedCarError.invalidUSDZ
+        }
+        let widthValue = width.intValue
+        let heightValue = height.intValue
+        guard widthValue > 0, heightValue > 0,
+              widthValue <= 4_096, heightValue <= 4_096 else {
+            throw ImportedCarError.invalidUSDZ
+        }
+        let (pixels, overflow) = widthValue.multipliedReportingOverflow(
+            by: heightValue
+        )
+        guard !overflow else { throw ImportedCarError.invalidUSDZ }
+        return pixels
+    }
+
+    /// Commits an already validated and RealityKit-loadable staging file.
+    static func commitImportedCar(from stagingURL: URL, to destination: URL) throws {
+        let manager = FileManager.default
+        if manager.fileExists(atPath: destination.path) {
+            _ = try manager.replaceItemAt(
+                destination,
+                withItemAt: stagingURL,
+                backupItemName: nil,
+                options: []
+            )
+        } else {
+            try manager.moveItem(at: stagingURL, to: destination)
+        }
+    }
+
+    /// Custom model for the player and ghost cars. Persisted imports are
+    /// validated and loaded asynchronously by ContentView after launch, so a
+    /// malformed model can never trap the app in a synchronous boot loop.
+    static var customCarTemplate: Entity? = try? Entity.load(named: "PlayerCar")
 
     /// A bundled default model for one AI kart (`AICar1-4.usdz`).
     static func bundledAICarTemplate(index: Int) -> Entity? {
@@ -128,13 +316,10 @@ enum EntityFactory {
         return try? Entity.load(named: resourceName)
     }
 
-    /// Models for the AI karts: an imported file wins over the bundled
-    /// default; nil slots fall back to the tinted procedural kart.
-    static var aiCarTemplates: [Entity?] = (0..<aiCarCount).map { index in
-        if let imported = try? Entity.load(contentsOf: importedAICarURL(index: index)) {
-            return imported
-        }
-        return bundledAICarTemplate(index: index)
+    /// Persisted imports replace these bundled templates asynchronously after
+    /// launch; nil slots fall back to the tinted procedural kart.
+    static var aiCarTemplates: [Entity?] = (0..<aiCarCount).map {
+        bundledAICarTemplate(index: $0)
     }
 
     /// User override for when nose auto-detection guesses wrong; persisted.

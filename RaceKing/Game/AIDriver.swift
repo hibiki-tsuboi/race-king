@@ -145,13 +145,20 @@ final class AIDriver {
         return min(topSpeed, cornerSpeed)
     }
 
-    /// Returns true when the kart just completed a lap.
-    func updateLap(checkpoints: [SIMD3<Float>], radius: Float) -> Bool {
-        guard RaceGame.advanceCheckpoint(
-            &nextCheckpoint, position: entity.position, checkpoints: checkpoints,
-            radius: radius
-        ) else { return false }
+    /// Returns the within-step fraction when the kart just completed a lap.
+    func updateLap(
+        from previousPosition: SIMD3<Float>, layout: TrackLayout,
+        checkpoints: [SIMD3<Float>], radius: Float
+    ) -> Float? {
+        guard let crossingFraction = RaceGame.advanceCheckpoint(
+            &nextCheckpoint,
+            from: previousPosition,
+            to: entity.position,
+            checkpoints: checkpoints,
+            radius: radius,
+            layout: layout
+        ) else { return nil }
         lapCount += 1
-        return true
+        return crossingFraction
     }
 }

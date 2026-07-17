@@ -13,57 +13,63 @@ struct ModeSelectionView: View {
     var onSelect: (RaceGame.Mode) -> Void
     var onBack: () -> Void
 
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
     var body: some View {
         GeometryReader { proxy in
             let horizontalPadding: CGFloat = proxy.size.width < 430 ? 20 : 32
+            let columnCount = dynamicTypeSize.isAccessibilitySize
+                ? 1 : proxy.size.width >= 700 ? 4 : 2
             let columns = Array(
                 repeating: GridItem(.flexible(), spacing: 12),
-                count: proxy.size.width >= 700 ? 4 : 2
+                count: columnCount
             )
 
             ZStack {
-                VStack(spacing: 18) {
-                    HStack {
-                        Button(action: onBack) {
-                            Image("ToTitle")
-                                .resizable()
-                                .scaledToFit()
-                                .frame(width: 150)
-                                .frame(minHeight: 44)
-                                .contentShape(Rectangle())
-                                .accessibilityHidden(true)
-                        }
-                        .buttonStyle(.plain)
-                        .disabled(isPreparing)
-                        .opacity(isPreparing ? 0.45 : 1)
-                        .accessibilityLabel("タイトルに戻る")
-
-                        Spacer()
-                    }
-                    .offset(y: -8)
-
-                    VStack(spacing: 5) {
-                        Text("遊ぶモードを選択")
-                            .font(.system(size: 30, weight: .black, design: .rounded))
-                            .foregroundStyle(.white)
-                        Text("モードを決めてからコースの準備を始めます")
-                            .font(.callout.bold())
-                            .multilineTextAlignment(.center)
-                            .foregroundStyle(.white.opacity(0.7))
-
-                        if isPreparing {
-                            HStack(spacing: 7) {
-                                ProgressView()
-                                    .tint(.white)
-                                Text("カメラを終了しています…")
-                                    .font(.caption.bold())
+                ScrollView {
+                    VStack(spacing: 18) {
+                        HStack {
+                            Button(action: onBack) {
+                                Image("ToTitle")
+                                    .resizable()
+                                    .scaledToFit()
+                                    .frame(width: min(150, proxy.size.width * 0.45))
+                                    .frame(minHeight: 44)
+                                    .contentShape(Rectangle())
+                                    .accessibilityHidden(true)
                             }
-                            .foregroundStyle(.white.opacity(0.75))
-                            .padding(.top, 5)
-                        }
-                    }
+                            .buttonStyle(.plain)
+                            .disabled(isPreparing)
+                            .opacity(isPreparing ? 0.45 : 1)
+                            .accessibilityLabel("タイトルに戻る")
 
-                    ScrollView {
+                            Spacer()
+                        }
+
+                        VStack(spacing: 5) {
+                            Text("遊ぶモードを選択")
+                                .font(.largeTitle.weight(.black))
+                                .fontDesign(.rounded)
+                                .multilineTextAlignment(.center)
+                                .foregroundStyle(.white)
+                            Text("モードを決めてからコースの準備を始めます")
+                                .font(.callout.bold())
+                                .multilineTextAlignment(.center)
+                                .foregroundStyle(.white.opacity(0.7))
+
+                            if isPreparing {
+                                HStack(spacing: 7) {
+                                    ProgressView()
+                                        .tint(.white)
+                                    Text("カメラを終了しています…")
+                                        .font(.caption.bold())
+                                }
+                                .foregroundStyle(.white.opacity(0.75))
+                                .padding(.top, 5)
+                                .accessibilityElement(children: .combine)
+                            }
+                        }
+
                         LazyVGrid(columns: columns, spacing: 12) {
                             ForEach(options) { option in
                                 modeButton(option)
@@ -71,11 +77,12 @@ struct ModeSelectionView: View {
                         }
                         .padding(.vertical, 4)
                     }
-                    .scrollIndicators(.hidden)
+                    .padding(.horizontal, horizontalPadding)
+                    .padding(.top, max(16, proxy.safeAreaInsets.top))
+                    .padding(.bottom, max(16, proxy.safeAreaInsets.bottom))
                 }
-                .padding(.horizontal, horizontalPadding)
-                .padding(.top, max(16, proxy.safeAreaInsets.top))
-                .padding(.bottom, max(16, proxy.safeAreaInsets.bottom))
+                .scrollIndicators(.hidden)
+                .scrollBounceBehavior(.basedOnSize)
             }
             .background { background }
         }
@@ -129,23 +136,50 @@ struct ModeSelectionView: View {
         Button {
             onSelect(option.mode)
         } label: {
-            ZStack {
-                Image(option.imageName)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(maxWidth: .infinity)
-                    .accessibilityHidden(true)
+            VStack(spacing: dynamicTypeSize.isAccessibilitySize ? 10 : 0) {
+                ZStack {
+                    Image(option.imageName)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(maxWidth: .infinity)
+                        .accessibilityHidden(true)
 
-                if let message = option.unavailableMessage {
-                    Text(message)
-                        .font(.caption.bold())
-                        .multilineTextAlignment(.center)
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 7)
-                        .background(.black.opacity(0.78), in: Capsule())
+                    if let message = option.unavailableMessage,
+                       !dynamicTypeSize.isAccessibilitySize {
+                        Text(message)
+                            .font(.caption.bold())
+                            .multilineTextAlignment(.center)
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 7)
+                            .background(
+                                .black.opacity(0.78),
+                                in: RoundedRectangle(cornerRadius: 12)
+                            )
+                    }
+                }
+
+                if dynamicTypeSize.isAccessibilitySize {
+                    VStack(spacing: 4) {
+                        Text(option.title)
+                            .font(.headline.weight(.black))
+                        Text(option.detail)
+                            .font(.body)
+                            .foregroundStyle(.white.opacity(0.78))
+                    }
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 14)
+                    .frame(maxWidth: .infinity)
                 }
             }
+            .background(
+                dynamicTypeSize.isAccessibilitySize
+                    ? AnyShapeStyle(.black.opacity(0.5))
+                    : AnyShapeStyle(.clear),
+                in: RoundedRectangle(cornerRadius: 18)
+            )
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)

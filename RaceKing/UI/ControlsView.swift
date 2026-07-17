@@ -18,8 +18,18 @@ struct ControlsView: View {
         HStack(alignment: .bottom) {
             if !game.tiltSteeringEnabled {
                 HStack(spacing: 16) {
-                    HoldButton(systemImage: "steeringwheel.arrowtriangle.left", size: 78, isPressed: $steerLeft)
-                    HoldButton(systemImage: "steeringwheel.arrowtriangle.right", size: 78, isPressed: $steerRight)
+                    HoldButton(
+                        systemImage: "steeringwheel.arrowtriangle.left",
+                        accessibilityLabel: "左に曲がる",
+                        size: 78,
+                        isPressed: $steerLeft
+                    )
+                    HoldButton(
+                        systemImage: "steeringwheel.arrowtriangle.right",
+                        accessibilityLabel: "右に曲がる",
+                        size: 78,
+                        isPressed: $steerRight
+                    )
                 }
             }
             Spacer()
@@ -27,12 +37,14 @@ struct ControlsView: View {
                 HoldButton(
                     systemImage: brakeSystemImage,
                     pressedSystemImage: pressedBrakeSystemImage,
+                    accessibilityLabel: game.speedRatio > 0.01 ? "ブレーキ" : "バック",
                     size: 72,
                     isPressed: brake
                 )
                 HoldButton(
                     systemImage: "pedal.accelerator",
                     pressedSystemImage: "pedal.accelerator.fill",
+                    accessibilityLabel: "アクセル",
                     size: 88,
                     isPressed: throttle
                 )
@@ -40,11 +52,25 @@ struct ControlsView: View {
         }
         .onChange(of: steerLeft) { updateSteering() }
         .onChange(of: steerRight) { updateSteering() }
+        .onChange(of: game.tiltSteeringEnabled) {
+            guard game.tiltSteeringEnabled else { return }
+            steerLeft = false
+            steerRight = false
+        }
+        .onDisappear(perform: releaseAllInputs)
     }
 
     private func updateSteering() {
         let direction = Float((steerRight ? 1 : 0) - (steerLeft ? 1 : 0))
         game.steeringInput = direction * Self.touchSteeringStrength
+    }
+
+    private func releaseAllInputs() {
+        steerLeft = false
+        steerRight = false
+        game.steeringInput = 0
+        game.throttleInput = false
+        game.brakeInput = false
     }
 
     private var throttle: Binding<Bool> {
@@ -68,6 +94,7 @@ struct ControlsView: View {
 struct HoldButton: View {
     let systemImage: String
     var pressedSystemImage: String? = nil
+    let accessibilityLabel: String
     var size: CGFloat = 70
     var tint: Color = .white
     @Binding var isPressed: Bool
@@ -89,5 +116,12 @@ struct HoldButton: View {
                     .onChanged { _ in isPressed = true }
                     .onEnded { _ in isPressed = false }
             )
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(accessibilityLabel)
+            .accessibilityValue(isPressed ? "押下中" : "停止中")
+            .accessibilityHint("実行するたびに押下と解放を切り替えます")
+            .accessibilityAddTraits(.isButton)
+            .accessibilityAction { isPressed.toggle() }
+            .onDisappear { isPressed = false }
     }
 }

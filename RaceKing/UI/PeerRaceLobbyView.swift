@@ -12,18 +12,27 @@ struct PeerRaceLobbyView: View {
     var canResetCoursePlacement: Bool
     var onResetCoursePlacement: () -> Void = {}
 
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @State private var showingDisconnectConfirmation = false
+
     var body: some View {
-        ViewThatFits(in: .vertical) {
-            lobbyContent
-            ScrollView {
-                lobbyContent
-            }
-            .scrollBounceBehavior(.basedOnSize)
-        }
-        .frame(maxWidth: 340)
+        lobbyContent
+        .frame(maxWidth: dynamicTypeSize.isAccessibilitySize ? 440 : 340)
         .foregroundStyle(.white)
         .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 14))
         .clipShape(RoundedRectangle(cornerRadius: 14))
+        .confirmationDialog(
+            "接続を終了しますか？",
+            isPresented: $showingDisconnectConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("接続を終了", role: .destructive) {
+                multiplayer.disconnect()
+            }
+            Button("キャンセル", role: .cancel) {}
+        } message: {
+            Text("ルームから退出し、現在の準備状態を破棄します。")
+        }
     }
 
     private var lobbyContent: some View {
@@ -118,21 +127,7 @@ struct PeerRaceLobbyView: View {
                     .font(.caption.bold())
             }
 
-            Picker(
-                "自分の車",
-                selection: Binding(
-                    get: { multiplayer.localCarChoice },
-                    set: { multiplayer.setLocalCarChoice($0) }
-                )
-            ) {
-                ForEach(multiplayer.availableLocalCarChoices) { choice in
-                    Text(choice.displayName)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.75)
-                        .tag(choice)
-                }
-            }
-            .pickerStyle(.segmented)
+            carPicker
 
             if multiplayer.isSynchronizingCarModels {
                 HStack(spacing: 7) {
@@ -160,7 +155,48 @@ struct PeerRaceLobbyView: View {
         }
     }
 
+    @ViewBuilder
+    private var carPicker: some View {
+        if dynamicTypeSize.isAccessibilitySize {
+            Picker("自分の車", selection: localCarChoice) {
+                carPickerOptions
+            }
+            .pickerStyle(.menu)
+            .buttonStyle(.bordered)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            Picker("自分の車", selection: localCarChoice) {
+                carPickerOptions
+            }
+            .pickerStyle(.segmented)
+        }
+    }
+
+    private var localCarChoice: Binding<RaceCarChoice> {
+        Binding(
+            get: { multiplayer.localCarChoice },
+            set: { multiplayer.setLocalCarChoice($0) }
+        )
+    }
+
+    private var carPickerOptions: some View {
+        ForEach(multiplayer.availableLocalCarChoices) { choice in
+            Text(choice.displayName)
+                .tag(choice)
+        }
+    }
+
     private func participantRow(_ participant: PeerRaceParticipant) -> some View {
+        ViewThatFits(in: .horizontal) {
+            participantRegularRow(participant)
+            participantCompactRow(participant)
+        }
+        .font(.caption.bold())
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(participantAccessibilityLabel(participant))
+    }
+
+    private func participantRegularRow(_ participant: PeerRaceParticipant) -> some View {
         HStack(spacing: 6) {
             Text("#\(participant.slot + 1)")
                 .monospacedDigit()
@@ -193,7 +229,54 @@ struct PeerRaceLobbyView: View {
                         ? .green : .white.opacity(0.55))
             }
         }
-        .font(.caption.bold())
+    }
+
+    private func participantCompactRow(_ participant: PeerRaceParticipant) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 6) {
+                Text("#\(participant.slot + 1)")
+                    .monospacedDigit()
+                    .foregroundStyle(.white.opacity(0.65))
+                Image(systemName: "car.side.fill")
+                    .foregroundStyle(carColor(participant.carChoice))
+                Text(participant.name)
+                    .lineLimit(2)
+                if participant.id == multiplayer.localPlayerID {
+                    Text("自分")
+                        .font(.caption2.bold())
+                        .padding(.horizontal, 4)
+                        .background(.white.opacity(0.18), in: Capsule())
+                }
+            }
+            HStack(spacing: 6) {
+                Text(participant.carChoice.displayName)
+                    .foregroundStyle(carColor(participant.carChoice))
+                if multiplayer.state == .connected {
+                    Label(
+                        participant.isReady ? "準備OK" : "準備中",
+                        systemImage: participant.isReady
+                            ? "checkmark.circle.fill" : "circle.dotted"
+                    )
+                    .foregroundStyle(participant.isReady
+                        ? .green : .white.opacity(0.65))
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func participantAccessibilityLabel(
+        _ participant: PeerRaceParticipant
+    ) -> String {
+        var parts = [
+            "\(participant.slot + 1)番、\(participant.name)",
+            "車は\(participant.carChoice.displayName)",
+        ]
+        if participant.id == multiplayer.localPlayerID { parts.append("自分") }
+        if multiplayer.state == .connected {
+            parts.append(participant.isReady ? "準備OK" : "準備中")
+        }
+        return parts.joined(separator: "、")
     }
 
     private func carColor(_ choice: RaceCarChoice?) -> Color {
@@ -382,7 +465,7 @@ struct PeerRaceLobbyView: View {
             }
 
             Button("接続を終了", role: .destructive) {
-                multiplayer.disconnect()
+                showingDisconnectConfirmation = true
             }
             .font(.caption.bold())
         }

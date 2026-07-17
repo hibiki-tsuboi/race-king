@@ -16,6 +16,7 @@ struct RoomScanView: View {
     let onError: (String) -> Void
 
     @State private var finishRequested = false
+    @State private var showingCancelConfirmation = false
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -27,18 +28,16 @@ struct RoomScanView: View {
             )
             .ignoresSafeArea()
 
-            HStack {
-                Button("キャンセル") { onCancel() }
-                    .disabled(finishRequested)
+            ViewThatFits(in: .horizontal) {
+                HStack {
+                    cancelButton
+                    Spacer()
+                    finishControl
+                }
 
-                Spacer()
-
-                if finishRequested {
-                    ProgressView()
-                        .tint(.white)
-                } else {
-                    Button("スキャン完了") { finishRequested = true }
-                        .fontWeight(.bold)
+                VStack(spacing: 10) {
+                    finishControl
+                    cancelButton
                 }
             }
             .foregroundStyle(.white)
@@ -47,6 +46,39 @@ struct RoomScanView: View {
             .background(.black.opacity(0.55))
         }
         .persistentSystemOverlays(.hidden)
+        .confirmationDialog(
+            "部屋のスキャンを中止しますか？",
+            isPresented: $showingCancelConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("スキャンを中止", role: .destructive, action: onCancel)
+            Button("スキャンを続ける", role: .cancel) {}
+        } message: {
+            Text("現在のスキャン結果は破棄されます。")
+        }
+    }
+
+    private var cancelButton: some View {
+        Button("キャンセル") { showingCancelConfirmation = true }
+            .buttonStyle(.bordered)
+            .disabled(finishRequested)
+    }
+
+    @ViewBuilder
+    private var finishControl: some View {
+        if finishRequested {
+            HStack(spacing: 8) {
+                ProgressView()
+                    .tint(.white)
+                Text("部屋モデルを処理中…")
+                    .font(.callout.bold())
+            }
+            .accessibilityElement(children: .combine)
+        } else {
+            Button("スキャン完了") { finishRequested = true }
+                .buttonStyle(.borderedProminent)
+                .fontWeight(.bold)
+        }
     }
 }
 

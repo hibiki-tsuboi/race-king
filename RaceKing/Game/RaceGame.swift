@@ -108,6 +108,14 @@ final class RaceGame {
         case finished
     }
 
+    /// Independent UI/lifecycle owners that may pause a solo race.
+    enum SuspensionReason: Hashable {
+        case settings
+        case confirmation
+        case appInactive
+        case arRecovery
+    }
+
     enum Mode: String, CaseIterable {
         case timeAttack
         case race
@@ -133,10 +141,16 @@ final class RaceGame {
         (0.17, -0.037), (0.17, 0.037),
         (0.26, 0),
     ]
+    private static let simulationStep: TimeInterval = 1.0 / 120.0
+    /// Longer gaps are app interruptions, not frames the race should replay.
+    private static let maximumSimulationFrame: TimeInterval = 0.25
 
     // MARK: - State observed by the HUD
 
     private(set) var phase: Phase = .ready
+    private var suspensionReasons: Set<SuspensionReason> = []
+    /// True until every owner that paused the solo race releases its reason.
+    var isSuspended: Bool { !suspensionReasons.isEmpty }
     /// False while RealityKit is resolving the course's world anchor;
     /// always true in simulator and virtual-camera play.
     private(set) var isCourseAnchored = true
@@ -284,13 +298,16 @@ final class RaceGame {
     var carHeading: Float { physics.heading }
     var speedRatio: Float { physics.speed / CarPhysics.maxSpeed }
     var isEngineRunning: Bool {
-        (phase == .countdown || phase == .racing) && !peerLocalFinished
+        !isSuspended
+            && (phase == .countdown || phase == .racing)
+            && !peerLocalFinished
     }
     var isDrifting: Bool { physics.isDrifting }
 
     // MARK: - Simulation
 
     private var physics = CarPhysics()
+    private var simulationAccumulator: TimeInterval = 0
     private var nextCheckpoint = 1
     private var countdownRemaining: TimeInterval = 0
     private var ghost: GhostRecorder
@@ -828,7 +845,7 @@ final class RaceGame {
         finalPosition = position
         playerPosition = position
         phase = .finished
-        physics.endDrift(rewardBoost: false)
+        stopPlayerAfterFinish()
         onEvent?(.raceFinished(position: position))
     }
 
@@ -844,13 +861,37 @@ final class RaceGame {
         }
         countdownRemaining = 3
         countdownValue = 3
+        suspensionReasons.removeAll()
+        simulationAccumulator = 0
+        clearPlayerInputs()
         phase = .countdown
         onEvent?(.countdownTick(3))
         return true
     }
 
+    /// Pauses only local play. Nearby races reject suspension so one peer
+    /// cannot silently stop its clock while the others continue.
+    @discardableResult
+    func suspendSoloRace(for reason: SuspensionReason) -> Bool {
+        guard mode != .peerRace,
+              phase == .countdown || phase == .racing else { return false }
+        let inserted = suspensionReasons.insert(reason).inserted
+        simulationAccumulator = 0
+        clearPlayerInputs()
+        return inserted
+    }
+
+    /// Releases only the caller's suspension ownership.
+    func resumeSoloRace(for reason: SuspensionReason) {
+        guard suspensionReasons.remove(reason) != nil else { return }
+        if suspensionReasons.isEmpty { simulationAccumulator = 0 }
+    }
+
     func reset() {
         phase = .ready
+        suspensionReasons.removeAll()
+        simulationAccumulator = 0
+        clearPlayerInputs()
         lapCount = 0
         currentLapTime = 0
         lastLapTime = nil
@@ -872,6 +913,8 @@ final class RaceGame {
 
     /// Advances the game by one frame. Called from the scene's update event.
     func update(deltaTime: TimeInterval) {
+        guard deltaTime.isFinite, deltaTime > 0 else { return }
+        let frameDelta = min(deltaTime, Self.maximumSimulationFrame)
         let anchored = mode == .roomDrive
             || !requiresCourseAnchor
             || anchorRoot.isAnchored
@@ -880,20 +923,24 @@ final class RaceGame {
         // Offer the non-AR mode when floor detection keeps struggling.
         if mode != .roomDrive, mode != .peerRace,
            phase == .ready, !anchored, !virtualModeActive {
-            floorSearchTime += deltaTime
+            floorSearchTime += frameDelta
             if floorSearchTime >= 8, !canOfferVirtualMode {
                 canOfferVirtualMode = true
             }
         }
 
-        if mode == .peerRace { updatePeerCars(deltaTime) }
+        if mode == .peerRace { updatePeerCars(frameDelta) }
+        guard !isSuspended else {
+            simulationAccumulator = 0
+            return
+        }
 
-        let dt = Float(min(deltaTime, 1.0 / 20.0))
         switch phase {
         case .ready:
-            break
+            simulationAccumulator = 0
         case .countdown:
-            countdownRemaining -= deltaTime
+            simulationAccumulator = 0
+            countdownRemaining -= frameDelta
             let newValue = max(1, Int(countdownRemaining.rounded(.up)))
             if newValue != countdownValue {
                 countdownValue = newValue
@@ -905,28 +952,65 @@ final class RaceGame {
                 ghost.beginLap()
                 onEvent?(.go)
             }
+        case .racing, .finished:
+            simulationAccumulator += frameDelta
+            while simulationAccumulator >= Self.simulationStep {
+                simulationAccumulator -= Self.simulationStep
+                simulateStep(Float(Self.simulationStep))
+            }
+        }
+    }
+
+    // MARK: - Fixed-step simulation
+
+    private func simulateStep(_ dt: Float) {
+        let deltaTime = TimeInterval(dt)
+        switch phase {
+        case .ready, .countdown:
+            return
         case .racing:
-            currentLapTime += deltaTime
-            if mode == .race || mode == .peerRace { raceTime += deltaTime }
             if mode == .peerRace, peerLocalFinished {
                 coastPlayer(dt, deltaTime: deltaTime)
-            } else {
-                stepPlayer(dt, deltaTime: deltaTime)
+                updateRanking()
+                return
             }
-            stepAI(dt)
+
+            currentLapTime += deltaTime
+            if mode == .race || mode == .peerRace { raceTime += deltaTime }
+
+            let playerPreviousPosition = stepPlayer(dt, deltaTime: deltaTime)
+            let aiPreviousPositions = driveAI(dt)
             separateCars()
+
+            let playerCrossing = mode == .roomDrive ? nil
+                : checkPlayerCheckpoint(from: playerPreviousPosition)
+            let aiFinishFractions = updateAILaps(from: aiPreviousPositions)
+            if let playerCrossing {
+                completePlayerLap(
+                    crossingFraction: playerCrossing,
+                    stepDuration: deltaTime,
+                    aiFinishesBeforePlayer: aiFinishFractions.count {
+                        // Exact ties deterministically favor the grid-ahead AI,
+                        // rather than whichever racer was updated first.
+                        $0 <= playerCrossing
+                    }
+                )
+            }
+            aiFinishedCount += aiFinishFractions.count
+
             updateGhost()
             updateRanking()
         case .finished:
             coastPlayer(dt, deltaTime: deltaTime)
-            stepAI(dt)
+            let aiPreviousPositions = driveAI(dt)
             separateCars()
+            aiFinishedCount += updateAILaps(from: aiPreviousPositions).count
         }
     }
 
-    // MARK: - Per-frame stepping
-
-    private func stepPlayer(_ dt: Float, deltaTime: TimeInterval) {
+    @discardableResult
+    private func stepPlayer(_ dt: Float, deltaTime: TimeInterval) -> SIMD3<Float> {
+        let previousPosition = car.position
         updateDrift(deltaTime)
         var offRoad = false
         var impact: Float = 0
@@ -1005,11 +1089,12 @@ final class RaceGame {
         if mode == .timeAttack {
             ghost.record(time: currentLapTime, position: car.position, heading: physics.heading)
         }
-        if mode != .roomDrive { checkPlayerCheckpoints() }
+        return previousPosition
     }
 
     /// Rolls a finished car to a halt without allowing reverse acceleration.
     private func coastPlayer(_ dt: Float, deltaTime: TimeInterval) {
+        physics.cancelBoost()
         let movement = physics.step(
             dt: dt, steeringInput: 0, throttle: false,
             brake: physics.speed > 0.01, offRoad: false
@@ -1022,16 +1107,36 @@ final class RaceGame {
         displaySpeed = Int(abs(physics.speed) * 400)
     }
 
-    private func stepAI(_ dt: Float) {
-        guard mode == .race else { return }
+    private func driveAI(_ dt: Float) -> [SIMD3<Float>] {
+        guard mode == .race else { return [] }
+        var previousPositions: [SIMD3<Float>] = []
+        previousPositions.reserveCapacity(aiDrivers.count)
         for driver in aiDrivers {
+            previousPositions.append(driver.entity.position)
             driver.drive(dt: dt, layout: layout)
-            if driver.updateLap(checkpoints: checkpoints, radius: layout.checkpointRadius),
-               driver.lapCount >= Self.raceLapTotal, !driver.finished {
+        }
+        return previousPositions
+    }
+
+    /// Marks AI finishers and returns their crossing fractions for fair
+    /// ordering against a player who finishes in the same simulation step.
+    private func updateAILaps(from previousPositions: [SIMD3<Float>]) -> [Float] {
+        guard mode == .race, previousPositions.count == aiDrivers.count else { return [] }
+        var finishFractions: [Float] = []
+        for (driver, previousPosition) in zip(aiDrivers, previousPositions)
+            where !driver.finished {
+            guard let crossingFraction = driver.updateLap(
+                from: previousPosition,
+                layout: layout,
+                checkpoints: checkpoints,
+                radius: layout.checkpointRadius
+            ) else { continue }
+            if driver.lapCount >= Self.raceLapTotal {
                 driver.finished = true
-                aiFinishedCount += 1
+                finishFractions.append(crossingFraction)
             }
         }
+        return finishFractions
     }
 
     // MARK: - Drift
@@ -1121,12 +1226,28 @@ final class RaceGame {
 
     private func clearDriftState() {
         physics.endDrift(rewardBoost: false)
+        physics.cancelBoost()
         brakeHoldTime = 0
         driftReleaseGrace = 0
         driftChargeLevelSeen = 0
         driftHopRemaining = 0
         for puff in smokePuffs { puff.entity.removeFromParent() }
         smokePuffs.removeAll()
+        glowBlue?.isEnabled = false
+        glowOrange?.isEnabled = false
+        boostFlame?.isEnabled = false
+    }
+
+    private func clearPlayerInputs() {
+        steeringInput = 0
+        throttleInput = false
+        brakeInput = false
+    }
+
+    private func stopPlayerAfterFinish() {
+        clearPlayerInputs()
+        physics.endDrift(rewardBoost: false)
+        physics.cancelBoost()
         glowBlue?.isEnabled = false
         glowOrange?.isEnabled = false
         boostFlame?.isEnabled = false
@@ -1209,6 +1330,10 @@ final class RaceGame {
 
     private func updateRanking() {
         guard mode == .race || mode == .peerRace else { return }
+        if mode == .race, let finalPosition {
+            playerPosition = finalPosition
+            return
+        }
         if !peerLocalFinished {
             let s = layout.nearestS(to: car.position, near: playerTrackS)
             playerProgress += layout.progressDelta(from: playerTrackS, to: s)
@@ -1229,39 +1354,67 @@ final class RaceGame {
 
     // MARK: - Lap logic
 
-    /// Advances `next` when `position` reaches its checkpoint; returns true
-    /// when the start line is crossed after all checkpoints (= lap complete).
-    /// Ordered checkpoints block course cutting.
+    /// Advances an ordered checkpoint and returns the within-step fraction only
+    /// when the directed finish line is crossed after all other checkpoints.
     static func advanceCheckpoint(
-        _ next: inout Int, position: SIMD3<Float>, checkpoints: [SIMD3<Float>],
-        radius: Float
-    ) -> Bool {
+        _ next: inout Int,
+        from previousPosition: SIMD3<Float>,
+        to position: SIMD3<Float>,
+        checkpoints: [SIMD3<Float>],
+        radius: Float,
+        layout: TrackLayout
+    ) -> Float? {
+        guard checkpoints.indices.contains(next) else { return nil }
+        if next == 0 {
+            guard let fraction = layout.finishLineCrossingFraction(
+                from: previousPosition,
+                to: position
+            ) else { return nil }
+            next = checkpoints.count > 1 ? 1 : 0
+            return fraction
+        }
+
         let target = checkpoints[next]
         let distance = simd_distance(
             SIMD2(position.x, position.z), SIMD2(target.x, target.z)
         )
-        guard distance < radius else { return false }
-        let completed = next == 0
+        guard distance < radius else { return nil }
         next = (next + 1) % checkpoints.count
-        return completed
+        return nil
     }
 
-    private func checkPlayerCheckpoints() {
-        guard Self.advanceCheckpoint(
-            &nextCheckpoint, position: car.position, checkpoints: checkpoints,
-            radius: layout.checkpointRadius
-        ) else { return }
+    private func checkPlayerCheckpoint(from previousPosition: SIMD3<Float>) -> Float? {
+        Self.advanceCheckpoint(
+            &nextCheckpoint,
+            from: previousPosition,
+            to: car.position,
+            checkpoints: checkpoints,
+            radius: layout.checkpointRadius,
+            layout: layout
+        )
+    }
 
+    private func completePlayerLap(
+        crossingFraction: Float,
+        stepDuration: TimeInterval,
+        aiFinishesBeforePlayer: Int
+    ) {
+        let fraction = TimeInterval(max(0, min(1, crossingFraction)))
+        let unusedStepTime = stepDuration * (1 - fraction)
+        let completedLapTime = max(0, currentLapTime - unusedStepTime)
         lapCount += 1
-        lastLapTime = currentLapTime
+        lastLapTime = completedLapTime
         switch mode {
         case .timeAttack:
-            let isBest = bestLapTime.map { currentLapTime < $0 } ?? true
-            sessionBestLapTime = min(sessionBestLapTime ?? currentLapTime, currentLapTime)
-            ghost.finishLap(duration: currentLapTime)
+            let isBest = bestLapTime.map { completedLapTime < $0 } ?? true
+            sessionBestLapTime = min(
+                sessionBestLapTime ?? completedLapTime,
+                completedLapTime
+            )
+            ghost.finishLap(duration: completedLapTime)
             if isBest {
-                bestLapTime = currentLapTime
-                UserDefaults.standard.set(currentLapTime, forKey: bestLapKey)
+                bestLapTime = completedLapTime
+                UserDefaults.standard.set(completedLapTime, forKey: bestLapKey)
             }
             if lapCount >= Self.timeAttackLapTotal {
                 if let sessionBestLapTime {
@@ -1272,35 +1425,43 @@ final class RaceGame {
                         sessionSetNewBestLap = true
                     }
                 }
+                currentLapTime = completedLapTime
                 phase = .finished
                 ghostCar.isEnabled = false
-                physics.endDrift(rewardBoost: false)
+                stopPlayerAfterFinish()
                 onEvent?(.timeAttackFinished(isNewBest: sessionSetNewBestLap))
             } else {
                 onEvent?(.lapCompleted(isBest: isBest))
-                currentLapTime = 0
+                currentLapTime = unusedStepTime
                 ghost.beginLap()
             }
         case .race:
             if lapCount >= Self.raceLapTotal {
-                let position = aiFinishedCount + 1
+                raceTime = max(0, raceTime - unusedStepTime)
+                currentLapTime = completedLapTime
+                let position = aiFinishedCount + aiFinishesBeforePlayer + 1
                 finalPosition = position
                 playerPosition = position
                 phase = .finished
-                physics.endDrift(rewardBoost: false)
+                stopPlayerAfterFinish()
                 onEvent?(.raceFinished(position: position))
             } else {
                 onEvent?(.lapCompleted(isBest: false))
-                currentLapTime = 0
+                currentLapTime = unusedStepTime
             }
         case .peerRace:
             if lapCount >= Self.raceLapTotal {
+                raceTime = max(0, raceTime - unusedStepTime)
+                currentLapTime = completedLapTime
                 peerLocalFinished = true
-                physics.endDrift(rewardBoost: false)
+                // Show the local checkered flag immediately. The authoritative
+                // position arrives after every connected racer has reported.
+                phase = .finished
+                stopPlayerAfterFinish()
                 onPeerRaceLocalFinish?(raceTime)
             } else {
                 onEvent?(.lapCompleted(isBest: false))
-                currentLapTime = 0
+                currentLapTime = unusedStepTime
             }
         case .roomDrive:
             break

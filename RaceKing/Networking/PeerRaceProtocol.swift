@@ -31,6 +31,8 @@ struct PeerRacePacket: Codable, Sendable {
         case carModel
         case carModelReady
         case carModelFailed
+        case clockSyncRequest
+        case clockSyncResponse
         case startRace
         case carState
         case finish
@@ -81,8 +83,16 @@ struct PeerRacePacket: Codable, Sendable {
     var carState: CarState?
     var raceTime: TimeInterval?
     var position: Int?
+    var roundID: UUID?
+    /// Host monotonic-clock value used to schedule a common countdown start.
+    var hostStartTime: TimeInterval?
+    /// Finish instant expressed in the host's monotonic-clock domain.
+    var hostFinishTime: TimeInterval?
+    var clockSequence: UInt64?
+    var clientSendTime: TimeInterval?
+    var hostTime: TimeInterval?
 
-    static let currentVersion = 7
+    static let currentVersion = 8
 
     static func hello(
         playerID: UUID, name: String, carChoice: RaceCarChoice
@@ -168,24 +178,68 @@ struct PeerRacePacket: Codable, Sendable {
         )
     }
 
-    static var startRace: Self { Self(kind: .startRace) }
+    static func clockSyncRequest(
+        sequence: UInt64, clientSendTime: TimeInterval
+    ) -> Self {
+        Self(
+            kind: .clockSyncRequest,
+            clockSequence: sequence,
+            clientSendTime: clientSendTime
+        )
+    }
+
+    static func clockSyncResponse(
+        sequence: UInt64,
+        clientSendTime: TimeInterval,
+        hostTime: TimeInterval
+    ) -> Self {
+        Self(
+            kind: .clockSyncResponse,
+            clockSequence: sequence,
+            clientSendTime: clientSendTime,
+            hostTime: hostTime
+        )
+    }
+
+    static func startRace(roundID: UUID, hostStartTime: TimeInterval) -> Self {
+        Self(
+            kind: .startRace,
+            roundID: roundID,
+            hostStartTime: hostStartTime
+        )
+    }
 
     static func carState(playerID: UUID, state: CarState) -> Self {
         Self(kind: .carState, playerID: playerID, carState: state)
     }
 
-    static func finish(playerID: UUID, raceTime: TimeInterval) -> Self {
-        Self(kind: .finish, playerID: playerID, raceTime: raceTime)
+    static func finish(
+        playerID: UUID,
+        roundID: UUID,
+        raceTime: TimeInterval,
+        hostFinishTime: TimeInterval
+    ) -> Self {
+        Self(
+            kind: .finish,
+            playerID: playerID,
+            raceTime: raceTime,
+            roundID: roundID,
+            hostFinishTime: hostFinishTime
+        )
     }
 
     static func finishResult(
-        playerID: UUID, position: Int, raceTime: TimeInterval
+        playerID: UUID,
+        roundID: UUID,
+        position: Int,
+        raceTime: TimeInterval
     ) -> Self {
         Self(
             kind: .finishResult,
             playerID: playerID,
             raceTime: raceTime,
-            position: position
+            position: position,
+            roundID: roundID
         )
     }
 
