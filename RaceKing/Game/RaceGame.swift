@@ -1491,6 +1491,7 @@ final class RaceGame {
             roomRoot.isEnabled = false
             movePlayer(to: root)
             car.isEnabled = true
+            AIDriver.rollRacePaces(for: aiDrivers)
             for (driver, slot) in zip(aiDrivers, Self.raceGridSlots.prefix(4)) {
                 driver.place(back: slot.back, lateral: slot.lateral, layout: layout)
                 root.addChild(driver.entity)

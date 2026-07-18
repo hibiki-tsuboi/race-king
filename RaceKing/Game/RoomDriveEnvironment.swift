@@ -5,8 +5,12 @@
 
 import Foundation
 import RealityKit
-import RoomPlan
 import simd
+// The headless logic harness compiles this file as a macOS CLI, where
+// RoomPlan does not exist; scanning entry points disappear with it.
+#if canImport(RoomPlan)
+import RoomPlan
+#endif
 #if canImport(UIKit)
 import UIKit
 #elseif canImport(AppKit)
@@ -68,6 +72,7 @@ struct RoomDriveEnvironment {
     let walls: [Wall]
     let obstacles: [Obstacle]
 
+    #if canImport(RoomPlan)
     init(capturedRoom: CapturedRoom) throws {
         let floorCandidates = capturedRoom.floors.compactMap { floor -> (points: [SIMD3<Float>], area: Float)? in
             let points = Self.worldCorners(of: floor)
@@ -115,6 +120,7 @@ struct RoomDriveEnvironment {
             )
         }
     }
+    #endif
 
     /// Intersects an aim ray with the scanned floor and validates enough room
     /// for the car. Returns nil when the player aims outside the usable area.
@@ -355,6 +361,7 @@ struct RoomDriveEnvironment {
         return length > 1e-5 ? normal / length : nil
     }
 
+    #if canImport(RoomPlan)
     private static func worldCorners(of floor: CapturedRoom.Surface) -> [SIMD3<Float>] {
         var localCorners = floor.polygonCorners
         if localCorners.count < 3 {
@@ -372,6 +379,7 @@ struct RoomDriveEnvironment {
             return SIMD3(world.x, world.y, world.z)
         }
     }
+    #endif
 
     private static func signedArea(of polygon: [SIMD2<Float>]) -> Float {
         guard polygon.count >= 3 else { return 0 }
