@@ -39,6 +39,24 @@ final class GameAudio {
     private var sourceNode: AVAudioSourceNode?
     private var recoveryObserverTokens: [NSObjectProtocol] = []
 
+    /// One looped background track per screen/game mode (bundled .m4a).
+    enum MusicTrack: String {
+        case title = "BGMTitle"
+        case timeAttack = "BGMTimeAttack"
+        case race = "BGMRace"
+        case peerRace = "BGMPeerRace"
+        case roomDrive = "BGMRoomDrive"
+    }
+
+    /// Players are created on first use and kept so a suspended race
+    /// resumes its track from the same position.
+    private var musicPlayers: [MusicTrack: AVAudioPlayer] = [:]
+    private var currentTrack: MusicTrack?
+    private var musicFadeTask: Task<Void, Never>?
+    /// True when the track should restart from the top on the next play.
+    private var musicRewindPending = true
+    private static let musicVolume: Float = 0.35
+
     deinit {
         let center = NotificationCenter.default
         for token in recoveryObserverTokens {
@@ -199,6 +217,85 @@ final class GameAudio {
             $0.engineFrequency = 60 + 260 * speed
             $0.engineAmplitude = running ? 0.06 + 0.2 * speed : 0
             $0.squealAmplitude = running && drifting ? 0.12 : 0
+        }
+    }
+
+    /// Drives the screen/mode BGM from the app state; call every frame.
+    /// Pausing (race suspension) keeps the playback position; a nil track
+    /// fades out and rewinds so the next play starts from the top.
+    func setMusic(track: MusicTrack?, suspended: Bool) {
+        if let track {
+            suspended ? pauseMusic() : playMusic(track)
+        } else {
+            stopMusic()
+        }
+    }
+
+    private func playMusic(_ track: MusicTrack) {
+        // Menu music can be the very first sound after launch.
+        if !started { start() }
+        guard started else { return }
+        if currentTrack != track {
+            // The outgoing track fades under the incoming one.
+            if let outgoing = currentPlayer {
+                fadeOutAndPause(outgoing)
+            }
+            currentTrack = track
+            musicRewindPending = true
+        } else {
+            // Resuming the same track cancels its pending fade-out.
+            musicFadeTask?.cancel()
+            musicFadeTask = nil
+        }
+        if musicPlayers[track] == nil {
+            guard let url = Bundle.main.url(
+                forResource: track.rawValue, withExtension: "m4a"
+            ), let player = try? AVAudioPlayer(contentsOf: url) else { return }
+            player.numberOfLoops = -1
+            musicPlayers[track] = player
+        }
+        guard let player = musicPlayers[track] else { return }
+        if musicRewindPending {
+            player.currentTime = 0
+            musicRewindPending = false
+        }
+        player.setVolume(Self.musicVolume, fadeDuration: 0)
+        // Re-issuing play() also recovers after a system interruption.
+        if !player.isPlaying {
+            player.play()
+        }
+    }
+
+    private var currentPlayer: AVAudioPlayer? {
+        currentTrack.flatMap { musicPlayers[$0] }
+    }
+
+    func pauseMusic() {
+        musicFadeTask?.cancel()
+        musicFadeTask = nil
+        // Pause every player so a mid-fade track cannot keep running.
+        for player in musicPlayers.values {
+            player.pause()
+        }
+    }
+
+    func stopMusic() {
+        guard let player = currentPlayer, !musicRewindPending else { return }
+        musicRewindPending = true
+        fadeOutAndPause(player)
+    }
+
+    /// Fades the given player out, then pauses it. Holds the player itself
+    /// (not `currentPlayer`) so a track switch during the fade is safe.
+    private func fadeOutAndPause(_ player: AVAudioPlayer) {
+        musicFadeTask?.cancel()
+        musicFadeTask = nil
+        guard player.isPlaying else { return }
+        player.setVolume(0, fadeDuration: 0.6)
+        musicFadeTask = Task { [weak player] in
+            try? await Task.sleep(for: .seconds(0.7))
+            guard !Task.isCancelled else { return }
+            player?.pause()
         }
     }
 

@@ -179,6 +179,8 @@ struct ContentView: View {
                     clearDrivingInput()
                     audio.setEngine(speedRatio: 0, running: false)
                 }
+                // Menus keep BGM running, so pause it on every screen.
+                audio.pauseMusic()
                 if !showingRoomScan {
                     arSession.pause()
                     if scenePhase == .background {
@@ -243,6 +245,10 @@ struct ContentView: View {
             content.add(game.anchorRoot)
             content.add(game.roomRoot)
             updateSubscription = content.subscribe(to: SceneEvents.Update.self) { event in
+                audio.setMusic(
+                    track: currentMusicTrack,
+                    suspended: game.isSuspended
+                )
                 guard screen == .game else { return }
                 game.update(deltaTime: event.deltaTime)
                 completeARRecoveryIfReady()
@@ -292,6 +298,21 @@ struct ContentView: View {
             realityViewSize = $0
         }
         .ignoresSafeArea()
+    }
+
+    /// The BGM to loop right now: the title track on menu screens, the
+    /// mode's track during active play, nil while placing/finished.
+    private var currentMusicTrack: GameAudio.MusicTrack? {
+        if screen != .game { return .title }
+        guard game.phase == .countdown || game.phase == .racing else {
+            return nil
+        }
+        switch game.mode {
+        case .timeAttack: return .timeAttack
+        case .race: return .race
+        case .peerRace: return .peerRace
+        case .roomDrive: return .roomDrive
+        }
     }
 
     private func showModeSelection() {
@@ -483,6 +504,7 @@ struct ContentView: View {
             clearDrivingInput()
             arCameraTrackingNormal = false
             audio.setEngine(speedRatio: 0, running: false)
+            audio.pauseMusic()
             if game.mode == .peerRace {
                 multiplayer.disconnect()
                 if game.phase != .ready { game.reset() }
@@ -507,6 +529,7 @@ struct ContentView: View {
             arCameraTrackingNormal = false
             clearDrivingInput()
             audio.setEngine(speedRatio: 0, running: false)
+            audio.pauseMusic()
             if game.mode == .peerRace {
                 multiplayer.disconnect()
                 if game.phase != .ready { game.reset() }
@@ -534,6 +557,7 @@ struct ContentView: View {
             _ = game.suspendSoloRace(for: .arRecovery)
             clearDrivingInput()
             audio.setEngine(speedRatio: 0, running: false)
+            audio.pauseMusic()
             // Initial placement intentionally has no anchor yet. Keep the
             // placement controls interactive instead of covering them with
             // the full-screen recovery view.
