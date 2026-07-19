@@ -300,18 +300,19 @@ struct ContentView: View {
         .ignoresSafeArea()
     }
 
-    /// The BGM to loop right now: the title track on menu screens, the
-    /// mode's track during active play, nil while placing/finished.
+    /// The BGM to loop right now: `opening` on the title/menu screens,
+    /// `setting` while preparing a race (course placement, lobby, room
+    /// setup), then a random race tune — or the free-drive one — during
+    /// play. Results (`finished`) fade to silence.
     private var currentMusicTrack: GameAudio.MusicTrack? {
-        if screen != .game { return .title }
-        guard game.phase == .countdown || game.phase == .racing else {
+        if screen != .game { return .opening }
+        switch game.phase {
+        case .ready:
+            return .setting
+        case .countdown, .racing:
+            return game.mode == .roomDrive ? .free : .race
+        case .finished:
             return nil
-        }
-        switch game.mode {
-        case .timeAttack: return .timeAttack
-        case .race: return .race
-        case .peerRace: return .peerRace
-        case .roomDrive: return .roomDrive
         }
     }
 

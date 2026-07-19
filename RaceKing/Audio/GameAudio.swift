@@ -39,19 +39,30 @@ final class GameAudio {
     private var sourceNode: AVAudioSourceNode?
     private var recoveryObserverTokens: [NSObjectProtocol] = []
 
-    /// One looped background track per screen/game mode (bundled .m4a).
-    enum MusicTrack: String {
-        case title = "BGMTitle"
-        case timeAttack = "BGMTimeAttack"
-        case race = "BGMRace"
-        case peerRace = "BGMPeerRace"
-        case roomDrive = "BGMRoomDrive"
+    /// Looped background tracks (bundled .m4a). `race` resolves to one of
+    /// seven tunes, rerolled whenever playback restarts from the top.
+    enum MusicTrack: Hashable {
+        case opening
+        case setting
+        case free
+        case race
+
+        fileprivate var resourceNames: [String] {
+            switch self {
+            case .opening: ["BGMOpening"]
+            case .setting: ["BGMSetting"]
+            case .free: ["BGMFree"]
+            case .race: (1...7).map { "BGMRace\($0)" }
+            }
+        }
     }
 
     /// Players are created on first use and kept so a suspended race
     /// resumes its track from the same position.
-    private var musicPlayers: [MusicTrack: AVAudioPlayer] = [:]
+    private var musicPlayers: [String: AVAudioPlayer] = [:]
     private var currentTrack: MusicTrack?
+    /// The concrete file the current track resolved to (the race roll).
+    private var currentResource: String?
     private var musicFadeTask: Task<Void, Never>?
     /// True when the track should restart from the top on the next play.
     private var musicRewindPending = true
@@ -247,14 +258,19 @@ final class GameAudio {
             musicFadeTask?.cancel()
             musicFadeTask = nil
         }
-        if musicPlayers[track] == nil {
+        if musicRewindPending {
+            // A fresh start also rerolls which race tune plays.
+            currentResource = track.resourceNames.randomElement()
+        }
+        guard let resource = currentResource else { return }
+        if musicPlayers[resource] == nil {
             guard let url = Bundle.main.url(
-                forResource: track.rawValue, withExtension: "m4a"
+                forResource: resource, withExtension: "m4a"
             ), let player = try? AVAudioPlayer(contentsOf: url) else { return }
             player.numberOfLoops = -1
-            musicPlayers[track] = player
+            musicPlayers[resource] = player
         }
-        guard let player = musicPlayers[track] else { return }
+        guard let player = musicPlayers[resource] else { return }
         if musicRewindPending {
             player.currentTime = 0
             musicRewindPending = false
@@ -267,7 +283,7 @@ final class GameAudio {
     }
 
     private var currentPlayer: AVAudioPlayer? {
-        currentTrack.flatMap { musicPlayers[$0] }
+        currentResource.flatMap { musicPlayers[$0] }
     }
 
     func pauseMusic() {
